@@ -1,0 +1,31 @@
+version: '3.8'
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: urja-nidhi-backend
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/urja_nidhi.db:/app/urja_nidhi.db
+      - ./backend/firebase_credentials.json:/app/firebase_credentials.json:ro
+      - ./logs:/app/logs
+    env_file: .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s; timeout: 10s; retries: 3; start_period: 40s
+  db-backup:
+    image: alpine:latest
+    volumes:
+      - ./backend/urja_nidhi.db:/data/urja_nidhi.db:ro
+      - ./backups:/backups
+    entrypoint: |
+      sh -c "while true; do
+        cp /data/urja_nidhi.db /backups/urja_nidhi_$(date +\%Y\%m\%d_\%H\%M\%S).db 2>/dev/null
+        find /backups -name '*.db' -mtime +7 -delete 2>/dev/null
+        sleep 86400
+      done"
+    depends_on: [backend]
+    restart: unless-stopped

@@ -1,0 +1,7 @@
+# Ignore sensitive files
+firebase_credentials.json
+.env
+__pycache__/
+*.pyc
+.venv/
+urja_nidhi.db
