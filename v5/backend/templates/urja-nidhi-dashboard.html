@@ -1,0 +1,1808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Urja Nidhi — Farmer Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&family=Noto+Sans+Kannada:wght@400;600&display=swap" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+:root {
+  --soil:    #4a3728;
+  --leaf:    #2d6a2d;
+  --leaf2:   #3d8b3d;
+  --leaf3:   #e8f5e2;
+  --sun:     #e67e00;
+  --sun2:    #fff3e0;
+  --sky:     #1565c0;
+  --sky2:    #e3f0ff;
+  --earth:   #795548;
+  --earth2:  #efebe9;
+  --cream:   #fafaf7;
+  --white:   #ffffff;
+  --border:  #d4c9b8;
+  --border2: #b8a898;
+  --text:    #2c2416;
+  --text2:   #5a4a3a;
+  --text3:   #8a7a6a;
+  --red:     #c62828;
+  --red2:    #ffebee;
+  --amber:   #e65100;
+  --amber2:  #fff8e1;
+  --green:   #1b5e20;
+  --green2:  #e8f5e9;
+  --radius:  10px;
+  --shadow:  0 2px 8px rgba(74,55,40,.10);
+  --shadow2: 0 4px 16px rgba(74,55,40,.14);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 15px; }
+body {
+  font-family: 'Noto Sans', sans-serif;
+  background: #f0ece4;
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* ── Top bar ── */
+.topbar {
+  background: var(--leaf);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  height: 56px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.2);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.topbar-left { display: flex; align-items: center; gap: 10px; }
+.topbar-logo {
+  width: 36px; height: 36px;
+  background: #fff;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+}
+.topbar-name { font-size: 18px; font-weight: 700; letter-spacing: .02em; }
+.topbar-sub { font-size: 11px; opacity: .8; }
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+.status-badge {
+  display: flex; align-items: center; gap: 5px;
+  background: rgba(255,255,255,.15);
+  padding: 4px 10px; border-radius: 20px;
+  font-size: 12px; font-weight: 500;
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #aaa; flex-shrink: 0; }
+.dot.on { background: #69f0ae; box-shadow: 0 0 6px #69f0ae; animation: blink 2s infinite; }
+.dot.warn { background: #ffca28; }
+@keyframes blink { 0%,100%{opacity:1}50%{opacity:.4} }
+
+/* ── Tabs ── */
+.tabs {
+  background: var(--white);
+  border-bottom: 2px solid var(--border);
+  display: flex;
+  overflow-x: auto;
+  padding: 0 16px;
+  gap: 0;
+}
+.tab {
+  padding: 14px 20px 12px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text3);
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  white-space: nowrap;
+  transition: color .2s, border-color .2s;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: -2px;
+}
+.tab:hover { color: var(--leaf2); }
+.tab.active { color: var(--leaf); border-bottom-color: var(--leaf); font-weight: 600; }
+.tab-icon { font-size: 16px; }
+
+/* ── Page layout ── */
+.page { display: none; padding: 20px 18px 40px; max-width: 1200px; margin: 0 auto; }
+.page.active { display: block; }
+
+/* ── Alert banner ── */
+.alert-banner {
+  display: none;
+  background: var(--red2);
+  border: 1px solid #ef9a9a;
+  border-left: 4px solid var(--red);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--red);
+  gap: 10px;
+}
+.alert-banner.show { display: flex; align-items: flex-start; flex-wrap: wrap; }
+.alert-banner ul { list-style: none; }
+.alert-banner li { padding: 2px 0; }
+
+/* ── Cards grid ── */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap: 12px; margin-bottom: 18px; }
+.card {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 14px;
+  box-shadow: var(--shadow);
+}
+.card-icon { font-size: 24px; margin-bottom: 6px; }
+.card-label { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: .07em; margin-bottom: 4px; }
+.card-val { font-size: 22px; font-weight: 700; line-height: 1; margin-bottom: 2px; }
+.card-unit { font-size: 11px; color: var(--text3); }
+.card.green .card-val { color: var(--leaf); }
+.card.orange .card-val { color: var(--sun); }
+.card.blue .card-val { color: var(--sky); }
+.card.brown .card-val { color: var(--earth); }
+
+/* ── Section ── */
+.section { background: var(--white); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 16px; margin-bottom: 16px; box-shadow: var(--shadow); }
+.section-title {
+  font-size: 15px; font-weight: 600; color: var(--leaf);
+  margin-bottom: 14px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.section-title span { font-size: 18px; }
+
+/* ── Two-col layout ── */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+@media(max-width:820px){ .two-col,.three-col { grid-template-columns:1fr; } }
+
+/* ── Sensor block ── */
+.sensor-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--cream);
+  text-align: center;
+}
+.sensor-block .label { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+.sensor-block .value { font-size: 26px; font-weight: 700; line-height: 1; margin-bottom: 4px; }
+.sensor-block .bar-wrap { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+.sensor-block .bar { height: 100%; border-radius: 3px; transition: width .6s, background .4s; }
+.sensor-block.ok .value { color: var(--leaf); }
+.sensor-block.warn .value { color: var(--amber); }
+.sensor-block.crit .value { color: var(--red); }
+
+/* ── Form elements ── */
+.field-group { margin-bottom: 12px; }
+.field-group label { display: block; font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 5px; }
+.field-group input, .field-group select {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border2);
+  border-radius: 7px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--white);
+  outline: none;
+  transition: border-color .2s;
+}
+.field-group input:focus, .field-group select:focus { border-color: var(--leaf2); }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+@media(max-width:500px){ .form-grid { grid-template-columns:1fr; } }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 10px 20px;
+  border: none; border-radius: 7px;
+  font-size: 14px; font-weight: 600; font-family: inherit;
+  cursor: pointer; transition: opacity .2s, transform .1s;
+}
+.btn:hover { opacity: .88; }
+.btn:active { transform: scale(.98); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn-primary { background: var(--leaf); color: #fff; }
+.btn-orange { background: var(--sun); color: #fff; }
+.btn-outline { background: var(--white); color: var(--leaf); border: 1px solid var(--leaf); }
+.btn-full { width: 100%; justify-content: center; }
+.btn-sm { padding: 6px 14px; font-size: 13px; }
+
+/* ── Result box ── */
+.result-box {
+  display: none;
+  border: 2px solid var(--leaf);
+  border-radius: var(--radius);
+  padding: 16px;
+  background: var(--green2);
+  margin-top: 14px;
+}
+.result-box.show { display: block; }
+.result-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+.result-item { background: var(--white); border-radius: 7px; padding: 10px 12px; border: 1px solid var(--border); }
+.result-item .rk { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing:.07em; margin-bottom: 3px; }
+.result-item .rv { font-size: 18px; font-weight: 700; }
+.rv.green { color: var(--leaf); }
+.rv.orange { color: var(--sun); }
+.rv.blue { color: var(--sky); }
+.savings-bar { margin: 8px 0; }
+.savings-bar .sb-labels { display: flex; justify-content: space-between; font-size: 12px; color: var(--text2); margin-bottom: 4px; }
+.savings-bar .track { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+.savings-bar .fill { height: 100%; border-radius: 4px; transition: width .8s ease; }
+.total-saved { background: var(--sun2); border: 1px solid #ffcc80; border-radius: 7px; padding: 10px 14px; margin-top: 10px; display: flex; justify-content: space-between; align-items: center; }
+.total-saved .tl { font-size: 13px; font-weight: 600; color: var(--amber); }
+.total-saved .tv { font-size: 20px; font-weight: 700; color: var(--sun); }
+
+/* ── Advisory chat ── */
+.chat-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--cream);
+  height: 320px;
+  overflow-y: auto;
+  padding: 14px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.chat-msg { max-width: 85%; }
+.chat-msg.user { align-self: flex-end; }
+.chat-msg.bot  { align-self: flex-start; }
+.chat-bubble {
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.chat-msg.user .chat-bubble { background: var(--leaf); color: #fff; border-bottom-right-radius: 4px; }
+.chat-msg.bot  .chat-bubble { background: var(--white); color: var(--text); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.chat-time { font-size: 10px; color: var(--text3); margin-top: 3px; text-align: right; }
+.chat-msg.bot .chat-time { text-align: left; }
+.chat-input-row { display: flex; gap: 8px; }
+.chat-input-row input {
+  flex: 1; padding: 10px 14px;
+  border: 1px solid var(--border2); border-radius: 7px;
+  font-size: 14px; font-family: inherit; outline: none;
+  transition: border-color .2s;
+}
+.chat-input-row input:focus { border-color: var(--leaf2); }
+.quick-questions { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
+.qq {
+  padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 500;
+  background: var(--leaf3); color: var(--leaf); border: 1px solid #a5d6a7;
+  cursor: pointer; transition: background .2s;
+}
+.qq:hover { background: #c8e6c9; }
+
+/* ── Notification settings ── */
+.notify-channel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--cream);
+  margin-bottom: 10px;
+}
+.notify-channel .ch-head { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+.ch-icon { font-size: 20px; }
+.notify-log { max-height: 200px; overflow-y: auto; }
+.log-row { display: flex; gap: 10px; align-items: flex-start; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.log-row:last-child { border-bottom: none; }
+.log-ch { font-weight: 600; min-width: 72px; }
+.log-ch.email { color: var(--sky); }
+.log-ch.sms { color: var(--sun); }
+.log-ch.whatsapp { color: var(--leaf); }
+.log-status.sent { color: var(--leaf); }
+.log-status.failed, .log-status.skipped_no_config { color: var(--text3); }
+.log-ts { color: var(--text3); white-space: nowrap; }
+
+/* ── Table ── */
+.tbl-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; background: var(--leaf3); color: var(--leaf); font-size: 11px; text-transform: uppercase; letter-spacing: .07em; padding: 8px 10px; font-weight: 600; }
+td { padding: 9px 10px; border-bottom: 1px solid var(--border); color: var(--text); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #f5f5ee; }
+
+/* ── NPK bars ── */
+.npk-row { margin-bottom: 12px; }
+.npk-row .npk-labels { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+.npk-row .npk-name { font-weight: 600; }
+.npk-row .track { height: 10px; background: var(--border); border-radius: 5px; overflow: hidden; }
+.npk-row .fill { height: 100%; border-radius: 5px; transition: width .8s; }
+
+/* ── Tag / pill ── */
+.tag { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+.tag.green { background: var(--green2); color: var(--green); }
+.tag.orange { background: var(--amber2); color: var(--amber); }
+.tag.red { background: var(--red2); color: var(--red); }
+.tag.blue { background: var(--sky2); color: var(--sky); }
+
+/* ── Empty state ── */
+.empty-state { text-align: center; padding: 28px 0; color: var(--text3); font-size: 13px; }
+.empty-state .es-icon { font-size: 36px; margin-bottom: 8px; }
+
+/* ── Chart container ── */
+.chart-wrap { position: relative; height: 200px; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* ── Auth modal overlay ── */
+.modal-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(44,36,22,.55); z-index: 500;
+  align-items: center; justify-content: center; padding: 16px;
+}
+.modal-overlay.show { display: flex; }
+.modal-box {
+  background: var(--white); border-radius: 14px;
+  padding: 32px 28px; width: 100%; max-width: 400px;
+  box-shadow: var(--shadow2);
+}
+.modal-title { font-size: 20px; font-weight: 700; color: var(--leaf); margin-bottom: 6px; }
+.modal-sub   { font-size: 13px; color: var(--text3); margin-bottom: 22px; }
+.modal-tabs  { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 20px; }
+.modal-tab   {
+  padding: 9px 20px; font-size: 14px; font-weight: 500;
+  color: var(--text3); cursor: pointer;
+  border-bottom: 3px solid transparent; margin-bottom: -2px;
+}
+.modal-tab.active { color: var(--leaf); border-bottom-color: var(--leaf); font-weight: 600; }
+.modal-err { color: var(--red); font-size: 12px; margin-top: 8px; min-height: 18px; }
+.modal-ok  { color: var(--leaf); font-size: 12px; margin-top: 8px; }
+
+/* ── Topbar user pill ── */
+.user-pill {
+  display: flex; align-items: center; gap: 7px;
+  background: rgba(255,255,255,.15);
+  padding: 5px 12px; border-radius: 20px;
+  font-size: 12px; font-weight: 500; cursor: pointer;
+  border: 1px solid rgba(255,255,255,.25);
+  transition: background .2s;
+}
+.user-pill:hover { background: rgba(255,255,255,.25); }
+.user-avatar {
+  width: 24px; height: 24px; border-radius: 50%;
+  background: var(--leaf2); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; flex-shrink: 0;
+}
+
+/* ── Login gate inside Notifications tab ── */
+.login-gate {
+  text-align: center; padding: 48px 20px;
+}
+.login-gate .gate-icon { font-size: 48px; margin-bottom: 14px; }
+.login-gate .gate-title { font-size: 18px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+.login-gate .gate-sub   { font-size: 13px; color: var(--text3); margin-bottom: 20px; line-height: 1.7; }
+
+/* ── Alert log row ── */
+.alert-log-row {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 0; border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.alert-log-row:last-child { border-bottom: none; }
+.alert-sev {
+  flex-shrink: 0; width: 72px; padding: 2px 8px;
+  border-radius: 20px; font-size: 11px; font-weight: 700;
+  text-align: center; text-transform: uppercase;
+}
+.alert-sev.critical { background: var(--red2); color: var(--red); }
+.alert-sev.warning  { background: var(--amber2); color: var(--amber); }
+.alert-sev.sent     { background: var(--green2); color: var(--green); }
+.alert-ch { font-size: 11px; color: var(--text3); min-width: 50px; }
+.alert-msg { flex: 1; color: var(--text2); }
+.alert-ts  { font-size: 11px; color: var(--text3); white-space: nowrap; }
+
+/* ── Responsive ── */
+@media(max-width:600px) {
+  .topbar-name { font-size: 15px; }
+  .cards { grid-template-columns: 1fr 1fr; }
+  .tab { padding: 12px 14px; font-size: 13px; }
+  .result-grid { grid-template-columns: 1fr 1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-logo">🌿</div>
+    <div>
+      <div class="topbar-name">Urja Nidhi</div>
+      <div class="topbar-sub">Energy Treasure Platform</div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="status-badge"><div class="dot" id="ws-dot"></div><span id="ws-lbl">Connecting…</span></div>
+    <div id="ts-badge" class="status-badge" style="display:none">—</div>
+    <!-- Login button (shown when logged out) -->
+    <button id="btn-login" class="user-pill" onclick="openAuthModal()">
+      <span>👤</span><span>Login / Register</span>
+    </button>
+    <!-- User info (shown when logged in) -->
+    <div id="btn-user" class="user-pill" style="display:none" onclick="handleLogout()">
+      <div class="user-avatar" id="user-avatar">?</div>
+      <span id="user-name">Farmer</span>
+      <span style="opacity:.7;font-size:10px">· Logout</span>
+    </div>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs">
+  <div class="tab active" onclick="showTab('dashboard')"><span class="tab-icon">🏠</span> Dashboard</div>
+  <div class="tab" onclick="showTab('predict')"><span class="tab-icon">🤖</span> AI Prediction</div>
+  <div class="tab" onclick="showTab('sensors')"><span class="tab-icon">📡</span> Live Sensors</div>
+  <div class="tab" onclick="showTab('advisory')"><span class="tab-icon">💬</span> Farm Advisor</div>
+  <div class="tab" onclick="showTab('notify')"><span class="tab-icon">🔔</span> Notifications</div>
+  <div class="tab" onclick="showTab('history')"><span class="tab-icon">📋</span> History</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- TAB 1: Dashboard -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="page active" id="tab-dashboard">
+
+  <div class="alert-banner" id="alert-banner">
+    <span style="font-size:20px;flex-shrink:0">⚠️</span>
+    <ul id="alert-list"></ul>
+  </div>
+
+  <!-- Summary cards -->
+  <div class="cards">
+    <div class="card green">
+      <div class="card-icon">🔥</div>
+      <div class="card-label">Daily Biogas</div>
+      <div class="card-val" id="d-bio">—</div>
+      <div class="card-unit">m³ / day</div>
+    </div>
+    <div class="card orange">
+      <div class="card-icon">⚡</div>
+      <div class="card-label">Energy This Week</div>
+      <div class="card-val" id="d-kwh">—</div>
+      <div class="card-unit">kWh</div>
+    </div>
+    <div class="card orange">
+      <div class="card-icon">💰</div>
+      <div class="card-label">Money Saved</div>
+      <div class="card-val" id="d-save">—</div>
+      <div class="card-unit">₹ / week</div>
+    </div>
+    <div class="card green">
+      <div class="card-icon">🌱</div>
+      <div class="card-label">Compost Quality</div>
+      <div class="card-val" id="d-comp">—</div>
+      <div class="card-unit">grade</div>
+    </div>
+    <div class="card green">
+      <div class="card-icon">♻️</div>
+      <div class="card-label">CO₂ Avoided</div>
+      <div class="card-val" id="d-co2">—</div>
+      <div class="card-unit">kg / week</div>
+    </div>
+    <div class="card blue">
+      <div class="card-icon">🍳</div>
+      <div class="card-label">Cooking Hours</div>
+      <div class="card-val" id="d-cook">—</div>
+      <div class="card-unit">hours / week</div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <!-- Live digester status -->
+    <div class="section">
+      <div class="section-title"><span>📡</span> Live Digester Status</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="sensor-block ok" id="sb-temp">
+          <div class="label">Temperature</div>
+          <div class="value" id="sv-temp">—</div>
+          <div style="font-size:11px;color:var(--text3)">Ideal: 35–40°C</div>
+          <div class="bar-wrap"><div class="bar" id="bar-temp" style="width:50%;background:var(--sun)"></div></div>
+        </div>
+        <div class="sensor-block ok" id="sb-ph">
+          <div class="label">pH Level</div>
+          <div class="value" id="sv-ph">—</div>
+          <div style="font-size:11px;color:var(--text3)">Ideal: 6.8–7.2</div>
+          <div class="bar-wrap"><div class="bar" id="bar-ph" style="width:60%;background:var(--leaf)"></div></div>
+        </div>
+        <div class="sensor-block ok" id="sb-pres">
+          <div class="label">Pressure</div>
+          <div class="value" id="sv-pres">—</div>
+          <div style="font-size:11px;color:var(--text3)">kPa</div>
+          <div class="bar-wrap"><div class="bar" id="bar-pres" style="width:70%;background:var(--sky)"></div></div>
+        </div>
+        <div class="sensor-block ok" id="sb-flow">
+          <div class="label">Gas Flow</div>
+          <div class="value" id="sv-flow">—</div>
+          <div style="font-size:11px;color:var(--text3)">L / hour</div>
+          <div class="bar-wrap"><div class="bar" id="bar-flow" style="width:40%;background:var(--earth)"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 7-day chart -->
+    <div class="section">
+      <div class="section-title"><span>📊</span> 7-Day Biogas Production</div>
+      <div class="chart-wrap"><canvas id="weekChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- NPK quick view -->
+  <div class="section">
+    <div class="section-title"><span>🌾</span> Manure Nutrient Status (Last Prediction)</div>
+    <div id="npk-empty" class="empty-state"><div class="es-icon">🌾</div>Run an AI Prediction to see your manure's nutrient profile</div>
+    <div id="npk-box" style="display:none">
+      <div class="npk-row">
+        <div class="npk-labels"><span class="npk-name">Nitrogen (N)</span><span id="npk-n-v" style="color:var(--leaf);font-weight:600">—</span></div>
+        <div class="track"><div class="fill" id="npk-n-b" style="width:0%;background:var(--leaf)"></div></div>
+      </div>
+      <div class="npk-row">
+        <div class="npk-labels"><span class="npk-name">Phosphorus (P)</span><span id="npk-p-v" style="color:var(--sky);font-weight:600">—</span></div>
+        <div class="track"><div class="fill" id="npk-p-b" style="width:0%;background:var(--sky)"></div></div>
+      </div>
+      <div class="npk-row">
+        <div class="npk-labels"><span class="npk-name">Potassium (K)</span><span id="npk-k-v" style="color:var(--sun);font-weight:600">—</span></div>
+        <div class="track"><div class="fill" id="npk-k-b" style="width:0%;background:var(--sun)"></div></div>
+      </div>
+      <div style="text-align:center;margin-top:10px">
+        <div style="font-size:12px;color:var(--text3);margin-bottom:4px">Compost Score</div>
+        <div id="npk-score" style="font-size:36px;font-weight:700;color:var(--leaf)">—</div>
+        <div style="font-size:11px;color:var(--text3)">out of 100</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- TAB 2: AI Prediction -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-predict">
+  <div class="section">
+    <div class="section-title"><span>🤖</span> AI Biogas & Manure Prediction</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:16px">
+      Fill in your farm details below. Our AI model (Random Forest + Gradient Boosting) will predict
+      how much biogas you'll produce and how much money you can save on fertilizer.
+    </p>
+
+    <div class="two-col">
+      <div>
+        <div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:10px;background:var(--leaf3);padding:7px 10px;border-radius:6px">🌾 Waste &amp; Digester Info</div>
+        <div class="form-grid">
+          <div class="field-group">
+            <label>Waste Type</label>
+            <select id="f-wt">
+              <option value="cow_dung">Cow Dung (Gobar)</option>
+              <option value="crop_residue">Crop Residue</option>
+              <option value="poultry_litter">Poultry Litter</option>
+              <option value="mixed">Mixed Waste</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label>Daily Waste (kg)</label>
+            <input type="number" id="f-wq" value="50" min="1" max="500"/>
+          </div>
+          <div class="field-group">
+            <label>C:N Ratio</label>
+            <input type="number" id="f-cn" value="25" min="5" max="50"/>
+          </div>
+          <div class="field-group">
+            <label>Moisture Level (%)</label>
+            <input type="number" id="f-mo" value="70" min="30" max="98"/>
+          </div>
+          <div class="field-group">
+            <label>Pre-treatment</label>
+            <select id="f-pt">
+              <option value="raw">Raw</option>
+              <option value="chopped">Chopped</option>
+              <option value="fermented">Fermented</option>
+              <option value="composted">Composted</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label>Retention Time (days)</label>
+            <input type="number" id="f-rt" value="25" min="10" max="45"/>
+          </div>
+        </div>
+
+        <div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:10px;background:var(--leaf3);padding:7px 10px;border-radius:6px;margin-top:4px">🌡️ Sensor / Climate Readings</div>
+        <div class="form-grid">
+          <div class="field-group">
+            <label>Digester Temperature (°C)</label>
+            <input type="number" id="f-tm" value="36" min="20" max="55"/>
+          </div>
+          <div class="field-group">
+            <label>pH Level</label>
+            <input type="number" id="f-ph" value="7.1" step="0.1" min="5" max="9"/>
+          </div>
+          <div class="field-group">
+            <label>Gas Flow Rate (L/h)</label>
+            <input type="number" id="f-gf" value="3.8" step="0.1"/>
+          </div>
+          <div class="field-group">
+            <label>Methane Content (%)</label>
+            <input type="number" id="f-mc" value="60" min="40" max="80"/>
+          </div>
+          <div class="field-group">
+            <label>Outside Temperature</label>
+            <input type="number" id="f-at" value="28"/>
+          </div>
+          <div class="field-group">
+            <label>Outside Humidity (%)</label>
+            <input type="number" id="f-hu" value="70"/>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:10px;background:var(--sun2);padding:7px 10px;border-radius:6px">🌿 Soil &amp; Crop Info</div>
+        <div class="form-grid">
+          <div class="field-group">
+            <label>Crop Type</label>
+            <select id="f-ct">
+              <option value="pulses">Pulses (Dal)</option>
+              <option value="soybean">Soybean</option>
+              <option value="groundnut">Groundnut</option>
+              <option value="chickpea">Chickpea (Chana)</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label>N Concentration (mg/kg)</label>
+            <input type="number" id="f-nc" value="2000"/>
+          </div>
+          <div class="field-group">
+            <label>P Concentration (mg/kg)</label>
+            <input type="number" id="f-pc" value="500"/>
+          </div>
+          <div class="field-group">
+            <label>K Concentration (mg/kg)</label>
+            <input type="number" id="f-kc" value="1200"/>
+          </div>
+          <div class="field-group">
+            <label>Soil N Need (kg/ha)</label>
+            <input type="number" id="f-sn" value="30"/>
+          </div>
+          <div class="field-group">
+            <label>Manure N Equiv. (kg/ha)</label>
+            <input type="number" id="f-mn" value="20"/>
+          </div>
+          <div class="field-group">
+            <label>Ext. Fertilizer Needed (kg)</label>
+            <input type="number" id="f-ef" value="10"/>
+          </div>
+          <div class="field-group">
+            <label>Collection Cost (₹)</label>
+            <input type="number" id="f-cc" value="60"/>
+          </div>
+          <div class="field-group">
+            <label>Operating Cost (₹/day)</label>
+            <input type="number" id="f-oc" value="40"/>
+          </div>
+          <div class="field-group">
+            <label>Microbial Activity</label>
+            <input type="number" id="f-ma" value="1500000"/>
+          </div>
+        </div>
+
+        <button class="btn btn-primary btn-full" id="pred-btn" onclick="runPredict()">
+          🤖 Run AI Prediction
+        </button>
+      </div>
+    </div>
+
+    <!-- Result box -->
+    <div class="result-box" id="result-box">
+      <div style="font-size:15px;font-weight:700;color:var(--leaf);margin-bottom:12px">✅ Prediction Results</div>
+      <div class="result-grid">
+        <div class="result-item"><div class="rk">Daily Biogas</div><div class="rv green" id="r-bio">—</div><div style="font-size:11px;color:var(--text3)">m³ / day</div></div>
+        <div class="result-item"><div class="rk">Weekly Biogas</div><div class="rv green" id="r-wb">—</div><div style="font-size:11px;color:var(--text3)">m³ / week</div></div>
+        <div class="result-item"><div class="rk">Energy Generated</div><div class="rv blue" id="r-en">—</div><div style="font-size:11px;color:var(--text3)">kWh / week</div></div>
+        <div class="result-item"><div class="rk">Cooking Hours</div><div class="rv orange" id="r-ck">—</div><div style="font-size:11px;color:var(--text3)">hrs / week</div></div>
+        <div class="result-item"><div class="rk">Urea Equivalent</div><div class="rv orange" id="r-ur">—</div><div style="font-size:11px;color:var(--text3)">kg</div></div>
+        <div class="result-item"><div class="rk">CO₂ Saved</div><div class="rv green" id="r-co">—</div><div style="font-size:11px;color:var(--text3)">kg</div></div>
+        <div class="result-item"><div class="rk">Nitrogen Level</div><div class="rv" id="r-ni">—</div></div>
+        <div class="result-item"><div class="rk">Compost Grade</div><div class="rv" id="r-cq">—</div></div>
+      </div>
+      <div class="savings-bar">
+        <div class="sb-labels"><span>Fertilizer savings (₹22/kg urea)</span><span id="r-fs" style="font-weight:600;color:var(--leaf)">₹—</span></div>
+        <div class="track"><div class="fill" id="sb-fs" style="width:0%;background:var(--leaf)"></div></div>
+      </div>
+      <div class="savings-bar">
+        <div class="sb-labels"><span>Energy savings (₹8.5/kWh)</span><span id="r-es" style="font-weight:600;color:var(--sky)">₹—</span></div>
+        <div class="track"><div class="fill" id="sb-es" style="width:0%;background:var(--sky)"></div></div>
+      </div>
+      <div class="total-saved">
+        <span class="tl">💰 Total saved this week</span>
+        <span class="tv" id="r-tot">₹—</span>
+      </div>
+      <div id="r-alerts" style="display:none;margin-top:10px;background:var(--red2);border:1px solid #ef9a9a;border-radius:7px;padding:10px 12px;font-size:13px;color:var(--red)"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- TAB 3: Live Sensors -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-sensors">
+  <div class="section">
+    <div class="section-title"><span>📡</span> Real-Time Sensor Readings</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px">
+      <div class="sensor-block ok" id="big-temp">
+        <div class="label">🌡️ Temperature</div>
+        <div class="value" id="bsv-temp">— °C</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px">Optimal: 35–40°C</div>
+        <div class="bar-wrap"><div class="bar" id="bbar-temp" style="width:50%;background:var(--sun)"></div></div>
+      </div>
+      <div class="sensor-block ok" id="big-ph">
+        <div class="label">⚗️ pH Level</div>
+        <div class="value" id="bsv-ph">—</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px">Optimal: 6.8–7.2</div>
+        <div class="bar-wrap"><div class="bar" id="bbar-ph" style="width:60%;background:var(--leaf)"></div></div>
+      </div>
+      <div class="sensor-block ok" id="big-pres">
+        <div class="label">🔵 Pressure (kPa)</div>
+        <div class="value" id="bsv-pres">— kPa</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px">Normal: 95–115 kPa</div>
+        <div class="bar-wrap"><div class="bar" id="bbar-pres" style="width:70%;background:var(--sky)"></div></div>
+      </div>
+      <div class="sensor-block ok" id="big-flow">
+        <div class="label">💨 Gas Flow</div>
+        <div class="value" id="bsv-flow">— L/h</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px">Good: > 2 L/h</div>
+        <div class="bar-wrap"><div class="bar" id="bbar-flow" style="width:40%;background:var(--earth)"></div></div>
+      </div>
+    </div>
+    <div class="section-title" style="margin-top:6px"><span>📈</span> pH &amp; Temperature Trend</div>
+    <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+  </div>
+
+  <!-- Manual test sensor input -->
+  <div class="section">
+    <div class="section-title"><span>⌨️</span> Manual Sensor Entry (test / offline)</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:14px">Use this when your ESP32 is not connected. Enter current readings manually.</p>
+    <div class="form-grid">
+      <div class="field-group"><label>Temperature (°C)</label><input type="number" id="ms-temp" value="36.5" step="0.1"/></div>
+      <div class="field-group"><label>pH</label><input type="number" id="ms-ph" value="7.1" step="0.01"/></div>
+      <div class="field-group"><label>Pressure (kPa)</label><input type="number" id="ms-pres" value="105"/></div>
+      <div class="field-group"><label>Gas Flow (L/h)</label><input type="number" id="ms-flow" value="3.8" step="0.1"/></div>
+    </div>
+    <button class="btn btn-outline" onclick="submitManualSensor()">📤 Submit Reading</button>
+    <span id="ms-status" style="margin-left:12px;font-size:13px;color:var(--leaf)"></span>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- TAB 4: Farm Advisor (AI Advisory) -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-advisory">
+  <div class="section">
+    <div class="section-title"><span>💬</span> Ask Your Farm Advisor</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px">
+      Ask any question about your biogas plant, manure, crop nutrition, or fertilizer savings.
+      Our AI advisor gives practical advice for Karnataka and Tamil Nadu farmers.
+    </p>
+    <div class="quick-questions">
+      <div class="qq" onclick="askQuestion('Why is my gas production low today?')">Why is gas low?</div>
+      <div class="qq" onclick="askQuestion('My pH is below 6.5. What should I do?')">pH too low?</div>
+      <div class="qq" onclick="askQuestion('How much urea fertilizer can I save this month?')">Urea savings?</div>
+      <div class="qq" onclick="askQuestion('How do I improve my compost quality?')">Improve compost?</div>
+      <div class="qq" onclick="askQuestion('What is the best waste for biogas — cow dung or poultry litter?')">Best waste type?</div>
+      <div class="qq" onclick="askQuestion('My digester temperature is 28°C. Is that okay?')">Temperature issue?</div>
+      <div class="qq" onclick="askQuestion('How to apply slurry to my chickpea field?')">Apply to crop?</div>
+      <div class="qq" onclick="askQuestion('How much money will I save in one year from biogas?')">Yearly savings?</div>
+    </div>
+    <div class="chat-box" id="chat-box">
+      <div class="chat-msg bot">
+        <div class="chat-bubble">
+          🙏 Namaskara! I am your Urja Nidhi farm advisor.<br><br>
+          I can help you with biogas production, digester maintenance, manure quality,
+          fertilizer savings, and crop nutrition.<br><br>
+          Type your question below or tap one of the quick options above.
+        </div>
+        <div class="chat-time">Ready to help</div>
+      </div>
+    </div>
+    <div class="chat-input-row">
+      <input type="text" id="chat-input" placeholder="Type your question here… (e.g. Why is gas flow low?)"
+             onkeydown="if(event.key==='Enter') sendChat()"/>
+      <button class="btn btn-primary" onclick="sendChat()" id="chat-btn">Send</button>
+    </div>
+  </div>
+
+  <!-- Previous questions -->
+  <div class="section">
+    <div class="section-title"><span>📚</span> Previous Questions</div>
+    <div class="tbl-wrap">
+      <table id="adv-hist-table">
+        <thead><tr><th>Time</th><th>Question</th><th>Answer (summary)</th></tr></thead>
+        <tbody id="adv-hist-body">
+          <tr><td colspan="3" style="color:var(--text3);text-align:center;padding:16px">No questions yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- TAB 5: Notifications -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-notify">
+
+  <!-- ── LOGIN GATE (shown when not logged in) ── -->
+  <div id="notify-gate" class="section">
+    <div class="login-gate">
+      <div class="gate-icon">🔔</div>
+      <div class="gate-title">Login to view your alerts</div>
+      <div class="gate-sub">
+        Urja Nidhi sends digester alerts directly to your registered<br>
+        email or phone number. Login or register to see your alert history<br>
+        and manage your notification preferences.
+      </div>
+      <button class="btn btn-primary" onclick="openAuthModal()">
+        👤 Login / Register
+      </button>
+    </div>
+  </div>
+
+  <!-- ── LOGGED-IN VIEW (shown after login) ── -->
+  <div id="notify-content" style="display:none">
+
+    <!-- Farmer greeting + contact info -->
+    <div class="section">
+      <div class="section-title"><span>👤</span> Your Account</div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div style="flex:1">
+          <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:4px" id="nc-name">—</div>
+          <div style="font-size:13px;color:var(--text3)" id="nc-email-line"></div>
+          <div style="font-size:13px;color:var(--text3)" id="nc-phone-line"></div>
+        </div>
+        <div style="background:var(--green2);border:1px solid #a5d6a7;border-radius:8px;padding:10px 16px;font-size:12px;color:var(--green)">
+          ✅ Alerts will be sent to your registered contact
+        </div>
+      </div>
+    </div>
+
+    <!-- Send test notification -->
+    <div class="section">
+      <div class="section-title"><span>📤</span> Send Test Alert</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:14px">
+        Verify your notifications are working by sending a test message to your registered contact.
+      </p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-outline" id="test-email-btn" onclick="sendTestToMyAccount('email')">📧 Test Email</button>
+        <button class="btn btn-outline" id="test-sms-btn"   onclick="sendTestToMyAccount('sms')">📱 Test SMS</button>
+      </div>
+      <div id="test-status" style="margin-top:10px;font-size:13px"></div>
+    </div>
+
+    <!-- Alert log — only this farmer's alerts -->
+    <div class="section">
+      <div class="section-title"><span>📋</span> Your Alert History</div>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:14px">
+        These are alerts sent to your account — immediately when sensor thresholds are crossed,
+        and daily summary reports every morning at 8 AM.
+      </p>
+      <div id="notify-log-content">
+        <div class="empty-state"><div class="es-icon">📭</div>No alerts sent to your account yet</div>
+      </div>
+      <button class="btn btn-outline btn-sm" style="margin-top:12px" onclick="loadMyAlerts()">🔄 Refresh</button>
+    </div>
+
+    <!-- What triggers alerts -->
+    <div class="section">
+      <div class="section-title"><span>⚡</span> Alert Rules</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:14px">
+        You receive alerts automatically when any of these conditions are detected:
+      </p>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="background:var(--leaf3)">
+            <th style="padding:8px 12px;text-align:left;color:var(--leaf);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Condition</th>
+            <th style="padding:8px 12px;text-align:left;color:var(--leaf);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Threshold</th>
+            <th style="padding:8px 12px;text-align:left;color:var(--leaf);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Severity</th>
+            <th style="padding:8px 12px;text-align:left;color:var(--leaf);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Channels</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border)"><td style="padding:9px 12px">pH too low</td><td style="padding:9px 12px">&lt; 6.5</td><td style="padding:9px 12px"><span class="alert-sev critical">Critical</span></td><td style="padding:9px 12px">Email + SMS</td></tr>
+          <tr style="border-bottom:1px solid var(--border)"><td style="padding:9px 12px">pH too high</td><td style="padding:9px 12px">&gt; 7.8</td><td style="padding:9px 12px"><span class="alert-sev warning">Warning</span></td><td style="padding:9px 12px">Email</td></tr>
+          <tr style="border-bottom:1px solid var(--border)"><td style="padding:9px 12px">Temperature too low</td><td style="padding:9px 12px">&lt; 30°C</td><td style="padding:9px 12px"><span class="alert-sev warning">Warning</span></td><td style="padding:9px 12px">Email</td></tr>
+          <tr style="border-bottom:1px solid var(--border)"><td style="padding:9px 12px">Temperature too high</td><td style="padding:9px 12px">&gt; 42°C</td><td style="padding:9px 12px"><span class="alert-sev critical">Critical</span></td><td style="padding:9px 12px">Email + SMS</td></tr>
+          <tr><td style="padding:9px 12px">Gas flow very low</td><td style="padding:9px 12px">&lt; 1.0 L/h</td><td style="padding:9px 12px"><span class="alert-sev warning">Warning</span></td><td style="padding:9px 12px">Email</td></tr>
+        </tbody>
+      </table>
+      <div style="margin-top:14px;padding:10px 14px;background:var(--sun2);border-radius:8px;font-size:12px;color:var(--amber)">
+        ⏰ <strong>Daily Summary</strong> — You also receive a daily report every morning at 8:00 AM with yesterday's averages and savings.
+      </div>
+    </div>
+
+    <!-- Threshold configuration -->
+    <div class="section">
+      <div class="section-title"><span>🎚️</span> Custom Threshold Settings</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:6px">
+        Set your own upper and lower limits for each sensor parameter.
+        Alerts fire when any reading crosses these boundaries.
+      </p>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:16px">
+        <strong>Warning</strong> — early notice. &nbsp;|&nbsp; <strong>Critical</strong> — urgent, sends SMS too. &nbsp;|&nbsp; Leave blank to disable that limit.
+      </p>
+      <div id="threshold-table-wrap">
+        <div class="empty-state"><div class="es-icon">⏳</div>Loading thresholds…</div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="saveAllThresholds()">💾 Save All Changes</button>
+        <button class="btn btn-outline" onclick="resetThresholds()">↺ Reset to Defaults</button>
+        <span id="thr-status" style="font-size:13px;align-self:center"></span>
+      </div>
+    </div>
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- TAB 6: History -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-history">
+  <div class="section">
+    <div class="section-title"><span>📋</span> Prediction History</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Date &amp; Time</th><th>Daily Biogas (m³)</th><th>Energy (kWh)</th><th>Saved (₹)</th><th>N Level</th><th>Compost</th></tr></thead>
+        <tbody id="hist-body">
+          <tr><td colspan="6" style="color:var(--text3);text-align:center;padding:18px">No predictions yet — go to AI Prediction tab</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><span>📊</span> Savings Over Time</div>
+    <div class="chart-wrap"><canvas id="savingsChart"></canvas></div>
+  </div>
+
+  <!-- PDF Report Download -->
+  <div class="section">
+    <div class="section-title"><span>📥</span> Download Report</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:16px">
+      Download a complete report of your digester's performance including sensor averages,
+      biogas production, savings, and prediction history.
+    </p>
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div class="field-group" style="margin:0;min-width:160px">
+        <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">Report Period</label>
+        <select id="report-days" style="padding:8px 12px;border:1px solid var(--border2);border-radius:7px;font-size:14px;font-family:inherit;color:var(--text);background:var(--white);outline:none">
+          <option value="7">Last 7 days</option>
+          <option value="14">Last 14 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+      </div>
+      <div style="padding-top:22px">
+        <button class="btn btn-primary" onclick="downloadReport()" id="report-btn">
+          📥 Download Report
+        </button>
+      </div>
+      <div id="report-status" style="padding-top:22px;font-size:13px;color:var(--text3)"></div>
+    </div>
+    <p style="font-size:11px;color:var(--text3);margin-top:12px">
+      ⚠️ You must be logged in to download your report. The file downloads as a .txt file.
+    </p>
+  </div>
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- AUTH MODAL                                             -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="auth-modal">
+  <div class="modal-box">
+    <div class="modal-title">🌿 Urja Nidhi</div>
+    <div class="modal-sub">Login or register to receive digester alerts</div>
+
+    <div class="modal-tabs">
+      <div class="modal-tab active" id="mtab-login"    onclick="switchModalTab('login')">Login</div>
+      <div class="modal-tab"        id="mtab-register" onclick="switchModalTab('register')">Register</div>
+    </div>
+
+    <!-- Login form -->
+    <div id="mform-login">
+      <p style="font-size:12px;color:var(--text3);margin-bottom:14px">
+        Enter your registered email <em>or</em> phone number.
+      </p>
+      <div class="field-group">
+        <label>Email Address</label>
+        <input type="email" id="li-email" placeholder="yourname@gmail.com" autocomplete="email"/>
+      </div>
+      <div style="text-align:center;font-size:12px;color:var(--text3);margin:8px 0">— or —</div>
+      <div class="field-group">
+        <label>Phone Number</label>
+        <input type="tel" id="li-phone" placeholder="+919876543210" autocomplete="tel"/>
+      </div>
+      <div class="modal-err" id="li-err"></div>
+      <button class="btn btn-primary btn-full" style="margin-top:14px" onclick="doLogin()">Login →</button>
+    </div>
+
+    <!-- Register form -->
+    <div id="mform-register" style="display:none">
+      <p style="font-size:12px;color:var(--text3);margin-bottom:14px">
+        Create your account. Alerts will be sent to the email/phone you provide.
+      </p>
+      <div class="field-group">
+        <label>Your Name *</label>
+        <input type="text" id="reg-name" placeholder="Rajesh Kumar" autocomplete="name"/>
+      </div>
+      <div class="field-group">
+        <label>Email Address <span style="color:var(--text3)">(for email alerts)</span></label>
+        <input type="email" id="reg-email" placeholder="yourname@gmail.com" autocomplete="email"/>
+      </div>
+      <div class="field-group">
+        <label>Phone Number <span style="color:var(--text3)">(for SMS alerts)</span></label>
+        <input type="tel" id="reg-phone" placeholder="+919876543210" autocomplete="tel"/>
+      </div>
+      <p style="font-size:11px;color:var(--text3);margin-bottom:10px">
+        Provide at least one of email or phone. You can add both to receive alerts on both channels.
+      </p>
+      <div class="modal-err" id="reg-err"></div>
+      <button class="btn btn-primary btn-full" style="margin-top:8px" onclick="doRegister()">Create Account →</button>
+    </div>
+
+    <button onclick="closeAuthModal()" style="width:100%;margin-top:14px;padding:8px;background:none;border:none;color:var(--text3);font-size:13px;cursor:pointer">Cancel</button>
+  </div>
+</div>
+
+<script>
+// ── Session state ────────────────────────────────────────
+let SESSION_TOKEN = localStorage.getItem('urja_token') || null;
+let CURRENT_FARMER = JSON.parse(localStorage.getItem('urja_farmer') || 'null');
+
+// ── Auth helpers ─────────────────────────────────────────
+function authHeaders() {
+  return SESSION_TOKEN
+    ? { 'Content-Type': 'application/json', 'X-Session-Token': SESSION_TOKEN }
+    : { 'Content-Type': 'application/json' };
+}
+
+function saveSession(token, farmer) {
+  SESSION_TOKEN   = token;
+  CURRENT_FARMER  = farmer;
+  localStorage.setItem('urja_token',  token);
+  localStorage.setItem('urja_farmer', JSON.stringify(farmer));
+  updateAuthUI();
+}
+
+function clearSession() {
+  SESSION_TOKEN  = null;
+  CURRENT_FARMER = null;
+  localStorage.removeItem('urja_token');
+  localStorage.removeItem('urja_farmer');
+  updateAuthUI();
+}
+
+function updateAuthUI() {
+  const loggedIn = !!SESSION_TOKEN && !!CURRENT_FARMER;
+
+  // Topbar
+  document.getElementById('btn-login').style.display = loggedIn ? 'none' : 'flex';
+  document.getElementById('btn-user').style.display  = loggedIn ? 'flex' : 'none';
+  if (loggedIn) {
+    const initials = (CURRENT_FARMER.name || 'F').split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase();
+    document.getElementById('user-avatar').textContent = initials;
+    document.getElementById('user-name').textContent   = CURRENT_FARMER.name;
+  }
+
+  // Notifications tab gate
+  document.getElementById('notify-gate').style.display    = loggedIn ? 'none'  : 'block';
+  document.getElementById('notify-content').style.display = loggedIn ? 'block' : 'none';
+
+  if (loggedIn) {
+    // Populate account info
+    set('nc-name', CURRENT_FARMER.name || '—');
+    const el = document.getElementById('nc-email-line');
+    const pl = document.getElementById('nc-phone-line');
+    if (el) el.textContent = CURRENT_FARMER.email ? '📧 ' + CURRENT_FARMER.email : '';
+    if (pl) pl.textContent = CURRENT_FARMER.phone ? '📱 ' + CURRENT_FARMER.phone : '';
+    // Hide test buttons that don't apply
+    const eb = document.getElementById('test-email-btn');
+    const sb = document.getElementById('test-sms-btn');
+    if (eb) eb.style.display = CURRENT_FARMER.email ? 'inline-flex' : 'none';
+    if (sb) sb.style.display = CURRENT_FARMER.phone ? 'inline-flex' : 'none';
+  }
+}
+
+// Restore session on page load
+async function restoreSession() {
+  if (!SESSION_TOKEN) return;
+  try {
+    const res = await fetch('/api/auth/me', { headers: authHeaders() });
+    const d   = await res.json();
+    if (d.logged_in) {
+      CURRENT_FARMER = d.farmer;
+      localStorage.setItem('urja_farmer', JSON.stringify(d.farmer));
+      updateAuthUI();
+    } else {
+      clearSession();
+    }
+  } catch(e) { /* server not ready yet */ }
+}
+
+// ── Auth modal ───────────────────────────────────────────
+function openAuthModal() {
+  document.getElementById('auth-modal').classList.add('show');
+  switchModalTab('login');
+}
+function closeAuthModal() {
+  document.getElementById('auth-modal').classList.remove('show');
+}
+function switchModalTab(tab) {
+  document.getElementById('mform-login').style.display    = tab==='login'    ? 'block' : 'none';
+  document.getElementById('mform-register').style.display = tab==='register' ? 'block' : 'none';
+  document.getElementById('mtab-login').classList.toggle('active',    tab==='login');
+  document.getElementById('mtab-register').classList.toggle('active', tab==='register');
+  document.getElementById('li-err').textContent  = '';
+  document.getElementById('reg-err').textContent = '';
+}
+
+async function doLogin() {
+  const email = document.getElementById('li-email').value.trim();
+  const phone = document.getElementById('li-phone').value.trim();
+  const err   = document.getElementById('li-err');
+  if (!email && !phone) { err.textContent = 'Enter your email or phone number'; return; }
+  err.textContent = '';
+  try {
+    const res  = await fetch('/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email || null, phone: phone || null })
+    });
+    const data = await res.json();
+    if (data.success) {
+      saveSession(data.token, data.farmer);
+      closeAuthModal();
+      loadMyAlerts();
+    } else {
+      err.textContent = data.error || 'Login failed';
+    }
+  } catch(e) { err.textContent = 'Server error: ' + e.message; }
+}
+
+async function doRegister() {
+  const name  = document.getElementById('reg-name').value.trim();
+  const email = document.getElementById('reg-email').value.trim();
+  const phone = document.getElementById('reg-phone').value.trim();
+  const err   = document.getElementById('reg-err');
+  if (!name)           { err.textContent = 'Name is required'; return; }
+  if (!email && !phone){ err.textContent = 'Provide at least one of email or phone'; return; }
+  err.textContent = '';
+  try {
+    const res  = await fetch('/api/auth/register', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email: email||null, phone: phone||null })
+    });
+    const data = await res.json();
+    if (data.success) {
+      saveSession(data.token, data.farmer);
+      closeAuthModal();
+      loadMyAlerts();
+    } else {
+      err.textContent = data.error || 'Registration failed';
+    }
+  } catch(e) { err.textContent = 'Server error: ' + e.message; }
+}
+
+async function handleLogout() {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST', headers: authHeaders() });
+  } catch(e) {}
+  clearSession();
+}
+
+// Close modal when clicking outside
+document.getElementById('auth-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeAuthModal();
+});
+
+// ── Tab switching ────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.currentTarget.classList.add('active');
+  if (name === 'history')  loadHistory();
+  if (name === 'notify')   { updateAuthUI(); if (SESSION_TOKEN) { loadMyAlerts(); loadThresholds(); } }
+  if (name === 'advisory') loadAdvisoryHistory();
+}
+
+// ── Chart.js setup ───────────────────────────────────────
+Chart.defaults.font.family = "'Noto Sans', sans-serif";
+Chart.defaults.font.size   = 11;
+Chart.defaults.color       = '#8a7a6a';
+Chart.defaults.borderColor = '#e0d6c8';
+
+// 7-day bar chart
+const wkCtx = document.getElementById('weekChart').getContext('2d');
+const weekChart = new Chart(wkCtx, {
+  type: 'bar',
+  data: {
+    labels: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'],
+    datasets: [
+      { label:'Actual Production (L)',    data:[82,87,91,85,null,null,null], backgroundColor:'rgba(45,107,45,.75)', borderRadius:4, borderSkipped:false },
+      { label:'Predicted Production (L)', data:[85,88,89,87,93,88,84],       backgroundColor:'rgba(230,126,0,.55)',  borderRadius:4, borderSkipped:false },
+    ]
+  },
+  options: {
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ position:'bottom', labels:{ boxWidth:10, padding:12 }}},
+    scales:{ x:{ grid:{display:false} }, y:{ grid:{color:'rgba(0,0,0,.05)'}, ticks:{ callback:v=>v+'L' }}}
+  }
+});
+
+// Trend chart
+const trCtx = document.getElementById('trendChart').getContext('2d');
+const trLabels=[], trPH=[], trTemp=[];
+const trendChart = new Chart(trCtx, {
+  type:'line',
+  data:{
+    labels:trLabels,
+    datasets:[
+      { label:'pH', data:trPH, borderColor:'#2d6a2d', borderWidth:2, pointRadius:3, tension:.4, fill:false, yAxisID:'yPH' },
+      { label:'Temperature °C', data:trTemp, borderColor:'#e67e00', borderWidth:2, pointRadius:3, tension:.4, fill:false, yAxisID:'yT' },
+    ]
+  },
+  options:{
+    responsive:true, maintainAspectRatio:false, animation:{duration:300},
+    plugins:{ legend:{ position:'bottom', labels:{ boxWidth:10, padding:12 }}},
+    scales:{
+      x:{ grid:{display:false}, ticks:{maxTicksLimit:8} },
+      yPH:{ position:'left',  min:5.5, max:8.5, ticks:{ callback:v=>'pH '+v }, grid:{ color:'rgba(0,0,0,.04)' } },
+      yT: { position:'right', min:24,  max:44,  ticks:{ callback:v=>v+'°C' }, grid:{display:false} },
+    }
+  }
+});
+
+// Savings over time
+const savCtx = document.getElementById('savingsChart').getContext('2d');
+const savingsChart = new Chart(savCtx, {
+  type:'bar',
+  data:{ labels:[], datasets:[
+    { label:'Money Saved (₹)', data:[], backgroundColor:'rgba(230,126,0,.7)', borderRadius:4, borderSkipped:false },
+  ]},
+  options:{ responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ position:'bottom', labels:{ boxWidth:10, padding:12 }}},
+    scales:{ x:{grid:{display:false}}, y:{grid:{color:'rgba(0,0,0,.05)'}, ticks:{callback:v=>'₹'+v}}}
+  }
+});
+
+// ── Helpers ──────────────────────────────────────────────
+const now = () => new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+const nowShort = () => new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
+const set = (id,v) => { const e=document.getElementById(id); if(e) e.textContent=v; };
+
+function updateSensors(d) {
+  const t=d.temperature, ph=d.ph, pr=d.pressure, fl=d.gas_flow;
+
+  // Dashboard mini sensors
+  set('sv-temp', t  !=null ? t.toFixed(1)+'°C'   : '—');
+  set('sv-ph',   ph !=null ? ph.toFixed(2)        : '—');
+  set('sv-pres', pr !=null ? pr.toFixed(1)+' kPa' : '—');
+  set('sv-flow', fl !=null ? fl.toFixed(2)+' L/h' : '—');
+
+  // Sensors tab big readings
+  set('bsv-temp', t  !=null ? t.toFixed(1)+'°C'   : '—');
+  set('bsv-ph',   ph !=null ? ph.toFixed(2)        : '—');
+  set('bsv-pres', pr !=null ? pr.toFixed(1)+' kPa' : '—');
+  set('bsv-flow', fl !=null ? fl.toFixed(2)+' L/h' : '—');
+
+  // Bars
+  const tp = t  ? Math.min(100,Math.max(0,(t-20)/30*100))   : 0;
+  const pp = ph ? Math.min(100,Math.max(0,(ph-5)/4*100))    : 0;
+  const prp= pr ? Math.min(100,Math.max(0,(pr-50)/150*100)) : 0;
+  const fp = fl ? Math.min(100,fl/10*100)                   : 0;
+
+  ['bar-temp','bbar-temp'].forEach(id=>{ const e=document.getElementById(id); if(e) e.style.width=tp+'%'; });
+  ['bar-ph','bbar-ph'].forEach(id=>{ const e=document.getElementById(id); if(e) e.style.width=pp+'%'; });
+  ['bar-pres','bbar-pres'].forEach(id=>{ const e=document.getElementById(id); if(e) e.style.width=prp+'%'; });
+  ['bar-flow','bbar-flow'].forEach(id=>{ const e=document.getElementById(id); if(e) e.style.width=fp+'%'; });
+
+  // pH status colour
+  const phOk = ph >= 6.5 && ph <= 7.8;
+  ['sb-ph','big-ph'].forEach(id=>{
+    const e=document.getElementById(id);
+    if(e){ e.className='sensor-block '+(phOk?'ok':(ph<6.5?'crit':'warn')); }
+  });
+  ['bar-ph','bbar-ph'].forEach(id=>{
+    const e=document.getElementById(id);
+    if(e) e.style.background = phOk?'var(--leaf)':(ph<6.5?'var(--red)':'var(--amber)');
+  });
+
+  // Temp colour
+  const tempOk = t>=30 && t<=42;
+  ['sb-temp','big-temp'].forEach(id=>{
+    const e=document.getElementById(id);
+    if(e) e.className='sensor-block '+(tempOk?'ok':(t<30?'warn':'crit'));
+  });
+
+  // Trend chart
+  const ts = nowShort();
+  trLabels.push(ts); trPH.push(ph); trTemp.push(t);
+  if(trLabels.length > 20){ trLabels.shift(); trPH.shift(); trTemp.shift(); }
+  trendChart.update('quiet');
+
+  set('ts-badge', 'Last update: ' + ts);
+  document.getElementById('ws-dot').className = 'dot on';
+}
+
+function showAlerts(alerts) {
+  const banner = document.getElementById('alert-banner');
+  const list   = document.getElementById('alert-list');
+  if (!alerts || !alerts.length) { banner.classList.remove('show'); return; }
+  banner.classList.add('show');
+  list.innerHTML = alerts.map(a=>
+    `<li>⚠️ ${a.message} <span style="color:var(--text3)">(${a.value})</span></li>`
+  ).join('');
+}
+
+function applyPrediction(r) {
+  const a = r.analytics || {};
+  // Dashboard cards
+  set('d-bio',  r.daily_biogas_m3 || '—');
+  set('d-kwh',  a.energy_kwh      || '—');
+  set('d-save', a.money_saved_inr  || '—');
+  set('d-comp', r.compost_quality  || '—');
+  set('d-co2',  a.co2_reduction_kg || '—');
+  set('d-cook', a.cooking_hours    || '—');
+
+  // Prediction result box
+  document.getElementById('result-box').classList.add('show');
+  set('r-bio', r.daily_biogas_m3    || '—');
+  set('r-wb',  a.weekly_biogas_m3   || '—');
+  set('r-en',  a.energy_kwh         || '—');
+  set('r-ck',  a.cooking_hours      || '—');
+  set('r-ur',  a.urea_equivalent_kg || '—');
+  set('r-co',  a.co2_reduction_kg   || '—');
+
+  const nEl = document.getElementById('r-ni');
+  if(nEl){ nEl.textContent=r.nitrogen_level||'—';
+    nEl.className='rv '+(r.nitrogen_level==='High'?'green':r.nitrogen_level==='Medium'?'orange':''); }
+
+  const cEl = document.getElementById('r-cq');
+  if(cEl){ cEl.textContent=r.compost_quality||'—';
+    cEl.className='rv '+(r.compost_quality==='Premium'||r.compost_quality==='Good'?'green':'orange'); }
+
+  set('r-fs', '₹'+(a.fertilizer_saved_inr||'—'));
+  set('r-es', '₹'+(a.energy_saved_inr||'—'));
+  set('r-tot','₹'+(a.money_saved_inr||'—'));
+
+  const mx=2000;
+  const fsb=document.getElementById('sb-fs'); if(fsb) fsb.style.width=Math.min(100,(a.fertilizer_saved_inr||0)/mx*100)+'%';
+  const esb=document.getElementById('sb-es'); if(esb) esb.style.width=Math.min(100,(a.energy_saved_inr||0)/mx*100)+'%';
+
+  // Alerts in result
+  const ab=document.getElementById('r-alerts');
+  if(r.alerts && r.alerts.length){
+    ab.style.display='block';
+    ab.innerHTML='⚠️ '+r.alerts.map(al=>al.message).join(' | ');
+  } else { ab.style.display='none'; }
+
+  // NPK
+  const nc=parseFloat(document.getElementById('f-nc').value)||2000;
+  const pc=parseFloat(document.getElementById('f-pc').value)||500;
+  const kc=parseFloat(document.getElementById('f-kc').value)||1200;
+  const mx2=Math.max(nc,pc,kc,1);
+  document.getElementById('npk-empty').style.display='none';
+  document.getElementById('npk-box').style.display='block';
+  set('npk-n-v', nc+' mg/kg'); document.getElementById('npk-n-b').style.width=nc/mx2*100+'%';
+  set('npk-p-v', pc+' mg/kg'); document.getElementById('npk-p-b').style.width=pc/mx2*100+'%';
+  set('npk-k-v', kc+' mg/kg'); document.getElementById('npk-k-b').style.width=kc/mx2*100+'%';
+  set('npk-score', r.compost_score||'—');
+
+  addHistRow(r);
+
+  // Update 7-day chart
+  const base = (r.daily_biogas_m3||1) * 1000;
+  weekChart.data.datasets[1].data = Array.from({length:7},()=>Math.round(base+(Math.random()-.5)*base*.12));
+  weekChart.update();
+}
+
+function addHistRow(r) {
+  const body=document.getElementById('hist-body');
+  const mt=body.querySelector('td[colspan]');
+  if(mt) mt.closest('tr').remove();
+  const ts = new Date(r.timestamp).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+  const a=r.analytics||{};
+  const ccol = r.compost_quality==='Premium'||r.compost_quality==='Good'?'color:var(--leaf)':'color:var(--sun)';
+  const ncol = r.nitrogen_level==='High'?'color:var(--leaf)':r.nitrogen_level==='Medium'?'color:var(--sun)':'';
+  const tr=document.createElement('tr');
+  tr.innerHTML=`<td>${ts}</td><td style="color:var(--leaf);font-weight:600">${r.daily_biogas_m3||'—'}</td>
+    <td>${a.energy_kwh||'—'}</td><td style="color:var(--sun);font-weight:600">₹${a.money_saved_inr||'—'}</td>
+    <td style="${ncol}">${r.nitrogen_level||'—'}</td><td style="${ccol}">${r.compost_quality||'—'}</td>`;
+  body.prepend(tr);
+  while(body.children.length>15) body.removeChild(body.lastChild);
+
+  // Savings chart
+  const lbl=new Date(r.timestamp).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
+  savingsChart.data.labels.push(lbl);
+  savingsChart.data.datasets[0].data.push(a.money_saved_inr||0);
+  if(savingsChart.data.labels.length>10){ savingsChart.data.labels.shift(); savingsChart.data.datasets[0].data.shift(); }
+  savingsChart.update();
+}
+
+// ── Run Prediction ───────────────────────────────────────
+async function runPredict() {
+  const btn=document.getElementById('pred-btn');
+  btn.disabled=true; btn.textContent='⏳ Predicting…';
+  const payload = {
+    waste_quantity:              parseFloat(document.getElementById('f-wq').value)||50,
+    cn_ratio:                    parseFloat(document.getElementById('f-cn').value)||25,
+    moisture_level:              parseFloat(document.getElementById('f-mo').value)||70,
+    temperature:                 parseFloat(document.getElementById('f-tm').value)||36,
+    ph:                          parseFloat(document.getElementById('f-ph').value)||7.1,
+    retention_time:              parseFloat(document.getElementById('f-rt').value)||25,
+    gas_flow_rate:               parseFloat(document.getElementById('f-gf').value)||3.8,
+    methane_concentration:       parseFloat(document.getElementById('f-mc').value)||60,
+    ambient_temperature:         parseFloat(document.getElementById('f-at').value)||28,
+    ambient_humidity:            parseFloat(document.getElementById('f-hu').value)||70,
+    nitrogen_concentration:      parseFloat(document.getElementById('f-nc').value)||2000,
+    phosphorus_concentration:    parseFloat(document.getElementById('f-pc').value)||500,
+    potassium_concentration:     parseFloat(document.getElementById('f-kc').value)||1200,
+    microbial_activity:          parseFloat(document.getElementById('f-ma').value)||1500000,
+    soil_n_requirement:          parseFloat(document.getElementById('f-sn').value)||30,
+    manure_equivalent_n:         parseFloat(document.getElementById('f-mn').value)||20,
+    external_fertilizer_required:parseFloat(document.getElementById('f-ef').value)||10,
+    waste_collection_cost:       parseFloat(document.getElementById('f-cc').value)||60,
+    digester_operating_cost:     parseFloat(document.getElementById('f-oc').value)||40,
+    waste_type:    document.getElementById('f-wt').value,
+    pre_treatment: document.getElementById('f-pt').value,
+    crop_type:     document.getElementById('f-ct').value,
+  };
+  try {
+    const res  = await fetch('/api/predict',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const data = await res.json();
+    if(data.error){ alert('Prediction error: '+data.error); }
+    else { applyPrediction(data); showTab.call({currentTarget:document.querySelector('.tab')}, 'predict'); }
+  } catch(e){ alert('Could not connect to server: '+e.message); }
+  finally { btn.disabled=false; btn.textContent='🤖 Run AI Prediction'; }
+}
+
+// ── Manual sensor submit ─────────────────────────────────
+async function submitManualSensor() {
+  const body={
+    temperature: parseFloat(document.getElementById('ms-temp').value),
+    ph:          parseFloat(document.getElementById('ms-ph').value),
+    pressure:    parseFloat(document.getElementById('ms-pres').value),
+    gas_flow:    parseFloat(document.getElementById('ms-flow').value),
+  };
+  try {
+    const res=await fetch('/api/sensor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await res.json();
+    const st=document.getElementById('ms-status');
+    if(d.status==='ingested'){ st.textContent='✅ Reading submitted'; st.style.color='var(--leaf)'; }
+    else { st.textContent='❌ '+d.error; st.style.color='var(--red)'; }
+  } catch(e){ document.getElementById('ms-status').textContent='❌ Server error'; }
+}
+
+// ── AI Advisory chat ─────────────────────────────────────
+function askQuestion(q) {
+  document.getElementById('chat-input').value = q;
+  sendChat();
+}
+
+async function sendChat() {
+  const inp=document.getElementById('chat-input');
+  const q=inp.value.trim();
+  if(!q) return;
+  inp.value='';
+
+  // Add user bubble
+  const box=document.getElementById('chat-box');
+  const um=document.createElement('div');
+  um.className='chat-msg user';
+  um.innerHTML=`<div class="chat-bubble">${q}</div><div class="chat-time">${nowShort()}</div>`;
+  box.appendChild(um);
+  box.scrollTop=box.scrollHeight;
+
+  // Thinking bubble
+  const tm=document.createElement('div');
+  tm.className='chat-msg bot';
+  tm.innerHTML='<div class="chat-bubble" id="thinking-bubble">🤔 Thinking…</div>';
+  box.appendChild(tm);
+  box.scrollTop=box.scrollHeight;
+
+  document.getElementById('chat-btn').disabled=true;
+
+  try {
+    const res=await fetch('/api/advisory',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:q})});
+    const data=await res.json();
+    document.getElementById('thinking-bubble').textContent = data.answer || data.error || 'Could not get response.';
+    tm.querySelector('.chat-bubble').insertAdjacentHTML('afterend',`<div class="chat-time">${nowShort()}</div>`);
+  } catch(e){
+    document.getElementById('thinking-bubble').textContent='❌ Could not connect to advisor. '+e.message;
+  }
+  document.getElementById('chat-btn').disabled=false;
+  box.scrollTop=box.scrollHeight;
+
+  loadAdvisoryHistory();
+}
+
+async function loadAdvisoryHistory() {
+  try {
+    const res=await fetch('/api/advisory/history?limit=10');
+    const rows=await res.json();
+    const body=document.getElementById('adv-hist-body');
+    if(!rows.length){ body.innerHTML='<tr><td colspan="3" style="color:var(--text3);text-align:center;padding:14px">No questions yet</td></tr>'; return; }
+    body.innerHTML=rows.map(r=>{
+      const ts=new Date(r.timestamp).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+      const ans=r.answer.length>100?r.answer.substring(0,100)+'…':r.answer;
+      return `<tr><td style="color:var(--text3);white-space:nowrap">${ts}</td><td style="font-weight:500">${r.question}</td><td style="color:var(--text2)">${ans}</td></tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+// ── Notifications — auth-aware ───────────────────────────
+async function sendTestToMyAccount(channel) {
+  if (!SESSION_TOKEN) { openAuthModal(); return; }
+  const stEl = document.getElementById('test-status');
+  stEl.textContent = 'Sending…'; stEl.style.color = 'var(--text3)';
+  try {
+    const res  = await fetch('/api/notify/test', {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ channel })
+    });
+    const data = await res.json();
+    if (data.success) {
+      stEl.textContent = '✅ Test sent! Check your ' + channel;
+      stEl.style.color = 'var(--leaf)';
+    } else {
+      stEl.textContent = '⚠️ ' + (data.message || data.error);
+      stEl.style.color = 'var(--amber)';
+    }
+  } catch(e) {
+    stEl.textContent = '❌ Error: ' + e.message;
+    stEl.style.color = 'var(--red)';
+  }
+  setTimeout(() => stEl.textContent = '', 5000);
+  loadMyAlerts();
+}
+
+async function loadMyAlerts() {
+  if (!SESSION_TOKEN) return;
+  try {
+    const res  = await fetch('/api/notifications?limit=30', { headers: authHeaders() });
+    if (res.status === 401) { clearSession(); return; }
+    const rows = await res.json();
+    const box  = document.getElementById('notify-log-content');
+    if (!rows.length) {
+      box.innerHTML = '<div class="empty-state"><div class="es-icon">📭</div>No alerts sent to your account yet</div>';
+      return;
+    }
+    box.innerHTML = rows.map(r => {
+      const ts  = new Date(r.timestamp).toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+      const chIcon = { email:'📧', sms:'📱', whatsapp:'💚' }[r.channel] || '🔔';
+      const statusBadge = r.status === 'sent'
+        ? '<span class="alert-sev sent">Sent ✅</span>'
+        : r.status.startsWith('skipped')
+          ? '<span style="font-size:11px;color:var(--text3)">Not configured</span>'
+          : '<span class="alert-sev" style="background:var(--red2);color:var(--red)">Failed</span>';
+      return `<div class="alert-log-row">
+        <span>${chIcon}</span>
+        <span class="alert-ch">${r.channel.toUpperCase()}</span>
+        <span class="alert-msg">${r.subject || (r.message||'').substring(0,80)}</span>
+        ${statusBadge}
+        <span class="alert-ts">${ts}</span>
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function loadHistory() {
+  try {
+    const res=await fetch('/api/analytics');
+    const d=await res.json();
+    const rows=d.history||[];
+    if(!rows.length) return;
+    const body=document.getElementById('hist-body');
+    body.innerHTML=rows.map(r=>{
+      const ts=new Date(r.timestamp).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+      const ccol=r.compost_quality==='Premium'||r.compost_quality==='Good'?'color:var(--leaf)':'color:var(--sun)';
+      const ncol=r.nitrogen_level==='High'?'color:var(--leaf)':r.nitrogen_level==='Medium'?'color:var(--sun)':'';
+      return `<tr><td>${ts}</td>
+        <td style="color:var(--leaf);font-weight:600">${r.daily_biogas||'—'}</td>
+        <td>${r.energy_kwh||'—'}</td>
+        <td style="color:var(--sun);font-weight:600">₹${r.money_saved||'—'}</td>
+        <td style="${ncol}">${r.nitrogen_level||'—'}</td>
+        <td style="${ccol}">${r.compost_quality||'—'}</td></tr>`;
+    }).join('');
+    // Savings chart from history
+    savingsChart.data.labels = rows.slice(0,10).reverse().map(r=>new Date(r.timestamp).toLocaleDateString('en-IN',{day:'2-digit',month:'short'}));
+    savingsChart.data.datasets[0].data = rows.slice(0,10).reverse().map(r=>r.money_saved||0);
+    savingsChart.update();
+  } catch(e){}
+}
+
+// ── Thresholds ───────────────────────────────────────────
+let _thresholds = [];   // cached from server
+
+async function loadThresholds() {
+  try {
+    const res  = await fetch('/api/thresholds');
+    _thresholds = await res.json();
+    renderThresholdTable(_thresholds);
+  } catch(e) {
+    document.getElementById('threshold-table-wrap').innerHTML =
+      '<p style="color:var(--red);font-size:13px">Could not load thresholds.</p>';
+  }
+}
+
+function renderThresholdTable(rows) {
+  const wrap = document.getElementById('threshold-table-wrap');
+  if (!rows || !rows.length) {
+    wrap.innerHTML = '<p style="color:var(--text3);font-size:13px">No thresholds configured.</p>';
+    return;
+  }
+  const thStyle = 'padding:8px 10px;text-align:left;background:var(--leaf3);color:var(--leaf);font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;white-space:nowrap';
+  const tdStyle = 'padding:8px 10px;border-bottom:1px solid var(--border)';
+
+  wrap.innerHTML = `
+  <div style="overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead>
+      <tr>
+        <th style="${thStyle}">Parameter</th>
+        <th style="${thStyle}">Unit</th>
+        <th style="${thStyle}" title="Send warning if value goes below this">⚠️ Low Warn</th>
+        <th style="${thStyle}" title="Send critical alert if value goes below this">🚨 Low Critical</th>
+        <th style="${thStyle}" title="Send warning if value goes above this">⚠️ High Warn</th>
+        <th style="${thStyle}" title="Send critical alert if value goes above this">🚨 High Critical</th>
+        <th style="${thStyle}">Enabled</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows.map(r => `
+      <tr data-param="${r.param}">
+        <td style="${tdStyle}"><strong>${r.label}</strong><br><span style="font-size:10px;color:var(--text3)">${r.param}</span></td>
+        <td style="${tdStyle}">${r.unit || '—'}</td>
+        <td style="${tdStyle}"><input class="thr-input" type="number" step="any"
+          data-field="low_warn" value="${r.low_warn ?? ''}"
+          placeholder="—"
+          style="width:80px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;font-size:13px;font-family:inherit;color:var(--amber)"></td>
+        <td style="${tdStyle}"><input class="thr-input" type="number" step="any"
+          data-field="low_crit" value="${r.low_crit ?? ''}"
+          placeholder="—"
+          style="width:80px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;font-size:13px;font-family:inherit;color:var(--red)"></td>
+        <td style="${tdStyle}"><input class="thr-input" type="number" step="any"
+          data-field="high_warn" value="${r.high_warn ?? ''}"
+          placeholder="—"
+          style="width:80px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;font-size:13px;font-family:inherit;color:var(--amber)"></td>
+        <td style="${tdStyle}"><input class="thr-input" type="number" step="any"
+          data-field="high_crit" value="${r.high_crit ?? ''}"
+          placeholder="—"
+          style="width:80px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;font-size:13px;font-family:inherit;color:var(--red)"></td>
+        <td style="${tdStyle}">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" class="thr-enable" ${r.enabled ? 'checked' : ''}
+              style="width:16px;height:16px;accent-color:var(--leaf)">
+            <span style="font-size:12px;color:var(--text3)">${r.enabled ? 'On' : 'Off'}</span>
+          </label>
+        </td>
+      </tr>`).join('')}
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:11px;color:var(--text3);margin-top:8px">
+    💡 Leave a field blank to disable that specific limit. Critical limits trigger Email + SMS. Warning limits trigger Email only.
+  </p>`;
+}
+
+async function saveAllThresholds() {
+  if (!SESSION_TOKEN) { openAuthModal(); return; }
+  const rows = document.querySelectorAll('#threshold-table-wrap tr[data-param]');
+  const st   = document.getElementById('thr-status');
+  st.textContent = 'Saving…'; st.style.color = 'var(--text3)';
+
+  let saved = 0, errors = 0;
+  for (const row of rows) {
+    const param   = row.dataset.param;
+    const inputs  = row.querySelectorAll('.thr-input');
+    const enabled = row.querySelector('.thr-enable');
+    const body    = { enabled: enabled && enabled.checked ? 1 : 0 };
+
+    inputs.forEach(inp => {
+      const val = inp.value.trim();
+      body[inp.dataset.field] = val === '' ? null : parseFloat(val);
+    });
+
+    try {
+      const res = await fetch(`/api/thresholds/${param}`, {
+        method: 'PUT', headers: authHeaders(), body: JSON.stringify(body)
+      });
+      const d = await res.json();
+      if (d.error) errors++;
+      else saved++;
+    } catch(e) { errors++; }
+  }
+
+  if (errors === 0) {
+    st.textContent = `✅ Saved ${saved} thresholds`; st.style.color = 'var(--leaf)';
+  } else {
+    st.textContent = `⚠️ Saved ${saved}, ${errors} failed`; st.style.color = 'var(--amber)';
+  }
+  setTimeout(() => st.textContent = '', 4000);
+  loadThresholds();   // re-render from server
+}
+
+async function resetThresholds() {
+  if (!SESSION_TOKEN) { openAuthModal(); return; }
+  if (!confirm('Reset all thresholds to default values?')) return;
+  const st = document.getElementById('thr-status');
+  try {
+    const res = await fetch('/api/thresholds/reset', { method: 'POST', headers: authHeaders() });
+    const d   = await res.json();
+    st.textContent = '✅ Reset to defaults'; st.style.color = 'var(--leaf)';
+    setTimeout(() => st.textContent = '', 3000);
+    loadThresholds();
+  } catch(e) { st.textContent = '❌ Error'; st.style.color = 'var(--red)'; }
+}
+
+// ── Load thresholds when tab opens ───────────────────────
+const _origShowTab = showTab;
+
+// ── PDF / Report Download ────────────────────────────────
+async function downloadReport() {
+  if (!SESSION_TOKEN) { openAuthModal(); return; }
+  const days = document.getElementById('report-days').value;
+  const btn  = document.getElementById('report-btn');
+  const st   = document.getElementById('report-status');
+  btn.disabled = true; btn.textContent = '⏳ Generating…';
+  st.textContent = '';
+  try {
+    const res = await fetch(`/api/report/pdf?days=${days}`, { headers: authHeaders() });
+    if (!res.ok) {
+      const d = await res.json();
+      st.textContent = '❌ ' + (d.error || 'Failed'); st.style.color = 'var(--red)';
+      return;
+    }
+    const blob     = await res.blob();
+    const url      = URL.createObjectURL(blob);
+    const a        = document.createElement('a');
+    const filename = res.headers.get('Content-Disposition')?.match(/filename=(.+)/)?.[1]
+                     || `urja_nidhi_report_${days}d.txt`;
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+    st.textContent = '✅ Report downloaded!'; st.style.color = 'var(--leaf)';
+    setTimeout(() => st.textContent = '', 4000);
+  } catch(e) {
+    st.textContent = '❌ Error: ' + e.message; st.style.color = 'var(--red)';
+  }
+  btn.disabled = false; btn.textContent = '📥 Download Report';
+}
+const socket=io(window.location.origin,{transports:['websocket','polling']});
+socket.on('connect',()=>{
+  document.getElementById('ws-dot').className='dot on';
+  set('ws-lbl','Live');
+});
+socket.on('disconnect',()=>{
+  document.getElementById('ws-dot').className='dot warn';
+  set('ws-lbl','Disconnected');
+});
+socket.on('sensor_update',d=>{
+  updateSensors(d);
+  showAlerts(d.alerts||[]);
+});
+socket.on('prediction_update',d=>applyPrediction(d));
+socket.on('advisory_response',d=>{/* handled in sendChat */});
+
+// ── Init ─────────────────────────────────────────────────
+restoreSession().then(() => {
+  if (SESSION_TOKEN) loadThresholds();
+});
+</script>
+</body>
+</html>

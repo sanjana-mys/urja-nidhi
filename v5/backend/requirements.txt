@@ -1,0 +1,28 @@
+# Core Flask
+flask==2.3.3
+flask-cors==4.0.1
+flask-socketio==5.3.6
+gunicorn==20.1.0
+
+# NOTE: Do NOT install eventlet — it conflicts with threading mode in Flask-SocketIO
+# eventlet is removed intentionally
+
+# ML
+numpy==1.26.4
+pandas==2.2.2
+joblib==1.3.2
+scikit-learn==1.6.1
+
+# Notifications
+twilio==8.13.0
+
+# .env loading (required — app.py calls load_dotenv() at startup)
+python-dotenv==1.0.0
+
+# Firebase Realtime Database (optional — only needed if using Firebase)
+# Install: pip install firebase-admin
+firebase-admin==6.5.0
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
