@@ -249,6 +249,16 @@ def init_db():
             last_login TEXT
         );
 
+        -- Farmer crop preferences for personalised crop-cycle prediction
+        CREATE TABLE IF NOT EXISTS farmer_crops (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            farmer_id INTEGER NOT NULL,
+            crop_name TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT,
+            UNIQUE(farmer_id, crop_name)
+        );
+
         -- Active session tokens (in-memory would be faster but DB survives restarts)
         CREATE TABLE IF NOT EXISTS sessions (
             token TEXT PRIMARY KEY,
@@ -403,6 +413,152 @@ def build_feature_df(data: dict) -> pd.DataFrame:
     if FEATURE_COLUMNS:
         df = df.reindex(columns=FEATURE_COLUMNS, fill_value=0)
     return df
+
+# Government-reference baseline data used for crop-cycle recommendations
+# Sources:
+# - India Meteorological Department (IMD) climatological normals and state trends
+# - Soil Health Card Scheme (Govt. of India) nutrient interpretation guidance
+GOVT_SOURCE_META = {
+    "temperature_source": "India Meteorological Department (IMD) - climatological normals and state seasonal trends",
+    "soil_source": "Soil Health Card Scheme, Department of Agriculture & Farmers Welfare, Govt. of India",
+}
+
+IMD_STATE_TEMP_BASELINES = {
+    "karnataka": {"kharif": [24, 31], "rabi": [18, 30], "zaid": [27, 36]},
+    "tamil nadu": {"kharif": [25, 33], "rabi": [20, 31], "zaid": [28, 37]},
+    "maharashtra": {"kharif": [24, 32], "rabi": [16, 29], "zaid": [28, 38]},
+    "telangana": {"kharif": [25, 34], "rabi": [18, 31], "zaid": [29, 39]},
+    "andhra pradesh": {"kharif": [25, 34], "rabi": [20, 32], "zaid": [29, 38]},
+}
+
+SOIL_PROFILE_BASELINES = {
+    "red_loam": {"n": 1800, "p": 450, "k": 900},
+    "black_cotton": {"n": 2000, "p": 500, "k": 1200},
+    "alluvial": {"n": 2200, "p": 550, "k": 1000},
+    "laterite": {"n": 1600, "p": 380, "k": 800},
+    "sandy_loam": {"n": 1500, "p": 420, "k": 750},
+}
+
+CROP_CYCLE_CATALOG = {
+    "pulses":    {"duration_days": [95, 120], "ideal_npk": [2200, 550, 1000], "ideal_temp_c": [20, 30], "season": "rabi"},
+    "soybean":   {"duration_days": [95, 115], "ideal_npk": [2500, 600, 1200], "ideal_temp_c": [22, 32], "season": "kharif"},
+    "groundnut": {"duration_days": [105, 135], "ideal_npk": [2300, 520, 1250], "ideal_temp_c": [22, 33], "season": "kharif"},
+    "chickpea":  {"duration_days": [95, 125], "ideal_npk": [2100, 500, 900], "ideal_temp_c": [18, 30], "season": "rabi"},
+    "maize":     {"duration_days": [90, 120], "ideal_npk": [2600, 650, 1300], "ideal_temp_c": [21, 34], "season": "kharif"},
+    "paddy":     {"duration_days": [110, 150], "ideal_npk": [2400, 620, 1100], "ideal_temp_c": [22, 35], "season": "kharif"},
+}
+
+DEFAULT_USER_CROPS = ["pulses", "groundnut", "soybean"]
+
+def _latest_sensor_and_npk():
+    """Return latest live sensor and best-available NPK values."""
+    conn = get_db()
+    sensor = conn.execute("""SELECT temperature, ph, pressure, gas_flow, timestamp
+        FROM sensor_readings ORDER BY id DESC LIMIT 1""").fetchone()
+    pred = conn.execute("""SELECT nitrogen_pct, nitrogen_level, timestamp
+        FROM prediction_results ORDER BY id DESC LIMIT 1""").fetchone()
+    conn.close()
+
+    sensor_d = dict(sensor) if sensor else {}
+    if pred and pred["nitrogen_pct"] is not None:
+        n_est = float(pred["nitrogen_pct"]) * 10000
+    else:
+        n_est = 2000.0
+
+    return {
+        "temperature": float(sensor_d.get("temperature", 30.0)),
+        "ph": float(sensor_d.get("ph", 7.0)),
+        "pressure": float(sensor_d.get("pressure", 100.0)),
+        "gas_flow": float(sensor_d.get("gas_flow", 3.0)),
+        "n": float(n_est),
+        "p": 500.0,
+        "k": 1200.0,
+        "timestamp": sensor_d.get("timestamp", datetime.now().isoformat()),
+    }
+
+def _score_component(actual, lo, hi):
+    if lo <= actual <= hi:
+        return 1.0
+    dist = min(abs(actual - lo), abs(actual - hi))
+    span = max(1.0, hi - lo)
+    return max(0.0, 1.0 - (dist / (span * 1.8)))
+
+def build_crop_cycle_predictions(crops: list, state: str, soil_type: str, start_date: datetime = None):
+    """
+    Build crop-cycle predictions using:
+    - Live NPK/sensor values
+    - IMD state seasonal baseline temperatures
+    - Soil Health Card aligned soil nutrient baselines
+    """
+    state_key = (state or "karnataka").strip().lower()
+    soil_key = (soil_type or "black_cotton").strip().lower()
+    if state_key not in IMD_STATE_TEMP_BASELINES:
+        state_key = "karnataka"
+    if soil_key not in SOIL_PROFILE_BASELINES:
+        soil_key = "black_cotton"
+
+    start_dt = start_date or datetime.now()
+    live = _latest_sensor_and_npk()
+    soil_base = SOIL_PROFILE_BASELINES[soil_key]
+    out = []
+
+    for crop in crops:
+        crop_key = crop.strip().lower()
+        if crop_key not in CROP_CYCLE_CATALOG:
+            continue
+        meta = CROP_CYCLE_CATALOG[crop_key]
+        season = meta["season"]
+        season_temp = IMD_STATE_TEMP_BASELINES[state_key][season]
+        ideal_n, ideal_p, ideal_k = meta["ideal_npk"]
+        lo_t, hi_t = meta["ideal_temp_c"]
+
+        # Blend government baseline + live sensor values
+        n_blend = round((live["n"] * 0.7) + (soil_base["n"] * 0.3), 1)
+        p_blend = round((live["p"] * 0.7) + (soil_base["p"] * 0.3), 1)
+        k_blend = round((live["k"] * 0.7) + (soil_base["k"] * 0.3), 1)
+
+        n_score = _score_component(n_blend, ideal_n * 0.8, ideal_n * 1.2)
+        p_score = _score_component(p_blend, ideal_p * 0.8, ideal_p * 1.2)
+        k_score = _score_component(k_blend, ideal_k * 0.8, ideal_k * 1.2)
+        t_score = _score_component(live["temperature"], lo_t, hi_t)
+        s_score = _score_component(live["temperature"], season_temp[0], season_temp[1])
+        fit = round(((n_score + p_score + k_score + t_score + s_score) / 5.0) * 100, 1)
+
+        dur_lo, dur_hi = meta["duration_days"]
+        # Better fit shortens uncertainty and slightly compresses cycle estimate
+        cycle_days = int(round(((dur_lo + dur_hi) / 2.0) - ((fit - 50) / 100.0) * 6))
+        cycle_days = max(dur_lo - 5, min(dur_hi + 5, cycle_days))
+        harvest = (start_dt + timedelta(days=cycle_days)).strftime("%d %b %Y")
+
+        out.append({
+            "crop": crop_key,
+            "start_date": start_dt.strftime("%Y-%m-%d"),
+            "cycle_days": cycle_days,
+            "duration_range_days": [dur_lo, dur_hi],
+            "expected_harvest_date": harvest,
+            "fit_score": fit,
+            "season": season,
+            "npk_available_mgkg": {"n": n_blend, "p": p_blend, "k": k_blend},
+            "npk_required_mgkg": {"n": ideal_n, "p": ideal_p, "k": ideal_k},
+            "recommendation": (
+                "Good to proceed" if fit >= 75 else
+                "Proceed with nutrient correction" if fit >= 55 else
+                "Delay planting and improve soil/temperature fit"
+            ),
+            "inputs_used": {
+                "live_temperature_c": live["temperature"],
+                "npk_estimate_mgkg": {"n": n_blend, "p": p_blend, "k": k_blend},
+                "state_temp_baseline_c": season_temp,
+                "soil_profile": soil_key,
+            }
+        })
+
+    return {
+        "predictions": out,
+        "live_context": live,
+        "start_date": start_dt.strftime("%Y-%m-%d"),
+        "government_sources": GOVT_SOURCE_META,
+    }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ── ALERT RULES — dynamic, driven by threshold table ─────────────────────────
@@ -762,8 +918,10 @@ def register():
 
     if not name:
         return jsonify({"error": "Name is required"}), 400
-    if not email and not phone:
-        return jsonify({"error": "Email or phone number is required"}), 400
+    if not email:
+        return jsonify({"error": "Email is required for website access"}), 400
+    if not phone:
+        return jsonify({"error": "Phone number is required for notifications"}), 400
 
     try:
         conn = get_db()
@@ -803,16 +961,11 @@ def login():
     """
     data  = request.get_json(force=True)
     email = (data.get("email") or "").strip().lower() or None
-    phone = (data.get("phone") or "").strip() or None
-
-    if not email and not phone:
-        return jsonify({"error": "Provide email or phone number"}), 400
+    if not email:
+        return jsonify({"error": "Email is required for website access"}), 400
 
     conn = get_db()
-    if email:
-        farmer = conn.execute("SELECT * FROM farmers WHERE email=?", (email,)).fetchone()
-    else:
-        farmer = conn.execute("SELECT * FROM farmers WHERE phone=?", (phone,)).fetchone()
+    farmer = conn.execute("SELECT * FROM farmers WHERE email=?", (email,)).fetchone()
     conn.close()
 
     if not farmer:
@@ -861,7 +1014,187 @@ def me():
         "phone": farmer["phone"],
     }})
 
+# ── Farmer crops (personalized crop list) ────────────────────────────────────
+@app.route("/api/crops", methods=["GET"])
+@require_login
+def get_crops():
+    try:
+        conn = get_db()
+        rows = conn.execute("""SELECT crop_name FROM farmer_crops
+            WHERE farmer_id=? AND is_active=1 ORDER BY crop_name""",
+            (request.farmer["id"],)).fetchall()
+        conn.close()
+        crops = [r["crop_name"] for r in rows] or DEFAULT_USER_CROPS
+        return jsonify({"crops": crops})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/crops", methods=["POST"])
+@require_login
+def add_crop():
+    data = request.get_json(force=True)
+    crop = (data.get("crop_name") or "").strip().lower()
+    if not crop:
+        return jsonify({"error": "crop_name is required"}), 400
+    try:
+        conn = get_db()
+        conn.execute("""INSERT INTO farmer_crops (farmer_id,crop_name,is_active,created_at)
+            VALUES (?,?,1,?)
+            ON CONFLICT(farmer_id,crop_name) DO UPDATE SET is_active=1""",
+            (request.farmer["id"], crop, datetime.now().isoformat()))
+        conn.commit(); conn.close()
+        return jsonify({"success": True, "crop_name": crop})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/crops/<crop_name>", methods=["DELETE"])
+@require_login
+def remove_crop(crop_name):
+    try:
+        conn = get_db()
+        conn.execute("""UPDATE farmer_crops SET is_active=0
+            WHERE farmer_id=? AND crop_name=?""",
+            (request.farmer["id"], crop_name.strip().lower()))
+        conn.commit(); conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+# ── Crop cycle prediction (NPK + govt weather/soil references) ───────────────
+@app.route("/api/crop-cycle/predict", methods=["POST"])
+@require_login
+def crop_cycle_predict():
+    data = request.get_json(force=True)
+    crops = data.get("crops") or []
+    state = (data.get("state") or "Karnataka").strip()
+    soil  = (data.get("soil_type") or "black_cotton").strip()
+    start_date_raw = (data.get("start_date") or "").strip()
+    if not isinstance(crops, list) or not crops:
+        return jsonify({"error": "Provide at least one crop"}), 400
+    try:
+        start_dt = None
+        if start_date_raw:
+            try:
+                start_dt = datetime.strptime(start_date_raw, "%Y-%m-%d")
+            except ValueError:
+                return jsonify({"error": "start_date must be YYYY-MM-DD"}), 400
+        base = build_crop_cycle_predictions(crops, state, soil, start_dt)
+
+        # AI narrative layer (Gemini if available, rule-based fallback otherwise)
+        ai_prompt = (
+            "You are an agronomy advisor. Summarise crop-cycle suitability "
+            "for Indian farmers in <=120 words, include 1 action step.\n"
+            f"State: {state}, Soil: {soil}, Predictions: {json.dumps(base['predictions'])}"
+        )
+        ai_text = get_ai_advisory(ai_prompt, {
+            "temperature": base["live_context"]["temperature"],
+            "ph": base["live_context"]["ph"],
+            "nitrogen": base["live_context"]["n"],
+        })
+        return jsonify({
+            **base,
+            "state": state,
+            "soil_type": soil,
+            "start_date": base.get("start_date"),
+            "ai_summary": ai_text,
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 400
+
 # ── AI Prediction (Layers 5+6+7) ─────────────────────────────────────────────
+@app.route("/api/predict/auto", methods=["POST", "GET"])
+def predict_auto():
+    """
+    Run prediction using latest sensor data from database.
+    No manual input required — auto-fetches from sensor_readings.
+    """
+    if model is None:
+        return jsonify({"error": "Model not loaded. Run train_model.py first."}), 503
+    try:
+        conn = get_db()
+        row  = conn.execute("""SELECT temperature, ph, pressure, gas_flow
+            FROM sensor_readings ORDER BY id DESC LIMIT 1""").fetchone()
+        conn.close()
+
+        if not row:
+            return jsonify({"error": "No sensor data yet. Use Live Sensors → Manual Entry or wait for IoT feed."}), 400
+
+        # Build payload from latest sensor + sensible defaults
+        data = {
+            "waste_quantity": 50, "cn_ratio": 25, "moisture_level": 70,
+            "temperature": float(row["temperature"] or 36),
+            "ph": float(row["ph"] or 7.0),
+            "retention_time": 25, "gas_flow_rate": float(row["gas_flow"] or 3.5),
+            "methane_concentration": 60, "ambient_temperature": 28, "ambient_humidity": 70,
+            "nitrogen_concentration": 2000, "phosphorus_concentration": 500,
+            "potassium_concentration": 1200, "microbial_activity": 1500000,
+            "soil_n_requirement": 30, "manure_equivalent_n": 20,
+            "external_fertilizer_required": 10, "waste_collection_cost": 60,
+            "digester_operating_cost": 40,
+            "waste_type": "cow_dung", "pre_treatment": "raw", "crop_type": "chickpea",
+            "digester_id": "DIG001",
+        }
+        feat  = build_feature_df(data)
+        raw   = float(model.predict(feat)[0])
+        daily = max(0.001, raw)
+        ana   = compute_analytics(daily)
+        ph    = data["ph"]
+        n_conc = data["nitrogen_concentration"]
+        comp_label, comp_score = classify_compost(daily, ph)
+        alerts = check_alerts({"ph": ph, "temperature": data["temperature"], "gas_flow": data["gas_flow_rate"]})
+        result = {
+            "daily_biogas_m3":  ana["daily_biogas_m3"],
+            "weekly_biogas_m3": ana["weekly_biogas_m3"],
+            "nitrogen_level":   classify_nitrogen(n_conc),
+            "nitrogen_pct":     round(n_conc / 10000, 3),
+            "compost_quality":  comp_label,
+            "compost_score":    comp_score,
+            "analytics":        ana,
+            "alerts":           alerts,
+            "timestamp":        datetime.now().isoformat(),
+            "source":           "auto",
+        }
+        conn = get_db()
+        conn.execute("""INSERT INTO prediction_results
+            (digester_id,daily_biogas,weekly_biogas,nitrogen_level,nitrogen_pct,
+             compost_quality,compost_score,money_saved,energy_kwh,urea_equivalent,
+             co2_reduction,cooking_hours,timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("DIG001", ana["daily_biogas_m3"], ana["weekly_biogas_m3"],
+             result["nitrogen_level"], result["nitrogen_pct"], comp_label, comp_score,
+             ana["money_saved_inr"], ana["energy_kwh"], ana["urea_equivalent_kg"],
+             ana["co2_reduction_kg"], ana["cooking_hours"], result["timestamp"]))
+        conn.commit(); conn.close()
+        socketio.emit("prediction_update", result)
+        if alerts:
+            threading.Thread(target=dispatch_alerts_to_all_farmers, args=(alerts,), daemon=True).start()
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 400
+
+@app.route("/api/predict/latest", methods=["GET"])
+def predict_latest():
+    """Return the latest prediction from database (for dashboard/reports)."""
+    try:
+        conn = get_db()
+        row  = conn.execute("""SELECT daily_biogas, weekly_biogas, nitrogen_level, nitrogen_pct,
+            compost_quality, compost_score, money_saved, energy_kwh,
+            urea_equivalent, co2_reduction, cooking_hours, timestamp
+            FROM prediction_results ORDER BY id DESC LIMIT 1""").fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"exists": False})
+        r = dict(row)
+        daily = r.get("daily_biogas") or 0
+        r["daily_biogas_m3"] = daily
+        r["analytics"] = compute_analytics(daily)
+        r["exists"] = True
+        r["alerts"] = []
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"error": str(e), "exists": False}), 400
+
 @app.route("/api/predict", methods=["POST"])
 def predict():
     if model is None:
@@ -1286,5 +1619,5 @@ if __name__ == "__main__":
     print(f"  Email:    {'✅ Ready'   if SMTP_CFG['user']    else '⚠️  SMTP not configured'}")
     print(f"  SMS:      {'✅ Ready'   if TWILIO_CFG['sid']   else '⚠️  Twilio not configured'}")
     print("=" * 60)
-    socketio.run(app, debug=True, host="0.0.0.0", port=5000,
-                 allow_unsafe_werkzeug=True)
+    socketio.run(app, debug=os.getenv("FLASK_DEBUG", "false").lower() == "true",
+                 host="0.0.0.0", port=5000, allow_unsafe_werkzeug=True)
