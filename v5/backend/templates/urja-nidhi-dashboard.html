@@ -797,7 +797,7 @@ tr:hover td { background: #f5f5ee; }
       </div>
 
       <div class="sensor-block ok" id="big-meth">
-        <div class="label">🔥 Methane (MQ5)*14.5</div>
+        <div class="label">🔥 Methane (MQ5)</div>
         <div class="value" id="bsv-meth">— ppm</div>
         <div style="font-size:12px;color:var(--text3);margin-top:4px">OK: 1000–3000 ppm</div>
         <div class="bar-wrap"><div class="bar" id="bbar-meth" style="width:0%;background:var(--sun)"></div></div>
@@ -2225,7 +2225,9 @@ async function downloadNotificationReport(type) {
     if (st) { st.textContent = '❌ Error: ' + e.message; st.style.color = 'var(--red)'; }
   }
 }
-const socket=io(window.location.origin,{transports:['websocket','polling']});
+// Websocket upgrade is failing under the current local Werkzeug setup.
+// Use polling transport for stable real-time updates.
+const socket=io(window.location.origin,{transports:['polling']});
 socket.on('connect',()=>{
   document.getElementById('ws-dot').className='dot on';
   set('ws-lbl','Live');
@@ -2238,6 +2240,8 @@ socket.on('sensor_update',d=>{
   updateSensors(d);
   showAlerts(d.alerts||[]);
 });
+// Fallback: Firebase merges + WS can occasionally miss; refresh latest row from DB.
+setInterval(loadLatestSensorSnapshot, 20000);
 socket.on('prediction_update',d=>applyPrediction(d));
 socket.on('advisory_response',d=>{/* handled in sendChat */});
 

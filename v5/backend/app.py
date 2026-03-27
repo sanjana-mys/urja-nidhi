@@ -138,7 +138,73 @@ FIREBASE_CONFIG = {
 # Firebase listener state
 _firebase_app    = None
 _firebase_active = False
+_firebase_listeners = []
 _last_valid_npk  = {"n": None, "p": None, "k": None}
+# Merged view of the node at FIREBASE_SENSOR_PATH (put "/" + dict replaces; leaf puts merge).
+_firebase_sensor_merge = {}
+
+
+def _flatten_firebase_sensor_dict(data: dict) -> dict:
+    """If ESP stores fields under readings/ or sensors/, merge for name lookups."""
+    if not isinstance(data, dict):
+        return data
+    out = dict(data)
+    for nest in ("readings", "sensors", "values", "data"):
+        inner = out.get(nest)
+        if isinstance(inner, dict):
+            for k, v in inner.items():
+                out.setdefault(k, v)
+    return out
+
+
+def _merge_firebase_listener_event(event) -> dict | None:
+    """
+    Firebase SSE sends a full dict at path '/' on initial sync, but per-field
+    writes arrive as path '/temperature' with a scalar — those were ignored when
+    we only accepted isinstance(data, dict).
+    """
+    global _firebase_sensor_merge
+    try:
+        et = getattr(event, "event_type", None)
+        if et and str(et).lower() not in ("put", "patch"):
+            return None
+    except Exception:
+        pass
+
+    path = getattr(event, "path", "/") or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    payload = event.data
+
+    if path in ("/", ""):
+        if isinstance(payload, dict):
+            _firebase_sensor_merge.clear()
+            _firebase_sensor_merge.update(payload)
+        elif payload is None:
+            _firebase_sensor_merge.clear()
+            return None
+        else:
+            return None
+    else:
+        segments = [s for s in path.strip("/").split("/") if s]
+        if isinstance(payload, dict):
+            for k, v in payload.items():
+                _firebase_sensor_merge[k] = v
+        else:
+            if segments:
+                _firebase_sensor_merge[segments[-1]] = payload
+
+    merged = _flatten_firebase_sensor_dict(_firebase_sensor_merge)
+    return merged if isinstance(merged, dict) and merged else None
+
+
+def _emit_sensor_update_ws(payload: dict) -> None:
+    """Emit from Firebase/simulation threads; app context keeps Flask-SocketIO happy."""
+    try:
+        with app.app_context():
+            socketio.emit("sensor_update", payload, namespace="/")
+    except Exception as e:
+        print(f"WebSocket sensor_update emit failed: {e}")
 
 def init_firebase():
     """
@@ -180,14 +246,25 @@ def firebase_sensor_listener():
     """
     try:
         from firebase_admin import db as firebase_db
-        path = FIREBASE_CONFIG["sensor_path"]
-        ref  = firebase_db.reference(path)
+        primary_path = (FIREBASE_CONFIG["sensor_path"] or "sensorData").strip("/")
+        # Listen ONLY to configured live sensor node to avoid stale/history mix-ups.
+        candidate_paths = [primary_path]
 
         def on_sensor_change(event):
             """Called by Firebase whenever data at sensor_path changes."""
             try:
-                data = event.data
-                if not isinstance(data, dict): return
+                data = _merge_firebase_listener_event(event)
+                if not isinstance(data, dict) or not data:
+                    return
+                # If this is a history bucket ({pushId: {...}}), pick the latest entry.
+                if not any(k in data for k in ("temperature", "temperature_C", "temp", "ph", "pH")):
+                    samples = [v for v in data.values() if isinstance(v, dict)]
+                    if samples:
+                        def _sample_ts(s):
+                            return str(s.get("timestamp", ""))
+                        data = max(samples, key=_sample_ts)
+                    else:
+                        return
                 # Normalise field names — handle multiple naming conventions
                 # Firebase may send: temperature_C, temperature, temp, etc.
 
@@ -229,6 +306,7 @@ def firebase_sensor_listener():
                 reading["methane_ppm"] = mq5_raw_to_ppm(reading["methane_raw"])
                 alerts = check_alerts(reading)
                 # Persist to SQLite
+                conn = None
                 try:
                     conn = get_db()
                     conn.execute("""INSERT INTO sensor_readings
@@ -240,10 +318,17 @@ def firebase_sensor_listener():
                          reading["methane_ppm"],
                          reading["nitrogen_concentration"], reading["phosphorus_concentration"],
                          reading["potassium_concentration"], reading["timestamp"]))
-                    conn.commit(); conn.close()
-                except Exception: pass
-                # Push to dashboard via WebSocket
-                socketio.emit("sensor_update", {**reading, "alerts": alerts})
+                    conn.commit()
+                except Exception as e:
+                    print(f"Firebase DB insert failed: {e}")
+                finally:
+                    try:
+                        if conn:
+                            conn.close()
+                    except Exception:
+                        pass
+                # Push to dashboard via WebSocket (thread + app context)
+                _emit_sensor_update_ws({**reading, "alerts": alerts})
                 # Send alerts immediately to all registered farmers
                 if alerts:
                     threading.Thread(
@@ -254,8 +339,19 @@ def firebase_sensor_listener():
             except Exception as e:
                 print(f"Firebase listener error: {e}")
 
-        # Start listening (this blocks, so it runs in its own thread)
-        ref.listen(on_sensor_change)
+        # Keep registrations alive for process lifetime; otherwise updates can stop.
+        global _firebase_listeners
+        for p in candidate_paths:
+            try:
+                reg = firebase_db.reference(p).listen(on_sensor_change)
+                _firebase_listeners.append(reg)
+                print(f"📡 Firebase subscribed: /{p}")
+            except Exception as e:
+                print(f"Firebase subscribe failed for /{p}: {e}")
+
+        # Keep this daemon thread alive so listener registrations remain reachable.
+        while True:
+            time.sleep(60)
     except Exception as e:
         print(f"Firebase listener failed: {e}")
 
@@ -265,12 +361,16 @@ def firebase_sensor_listener():
 DB_PATH = os.path.join(CWD, "urja_nidhi.db")
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # Make concurrent writes from Firebase thread + HTTP handlers more resilient.
+    conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
+    conn.execute("PRAGMA busy_timeout = 20000")
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     conn = get_db()
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript("""
         -- Sensor readings from IoT / Firebase
         CREATE TABLE IF NOT EXISTS sensor_readings (
@@ -2092,7 +2192,7 @@ def ingest_sensor():
              sensor_reading["nitrogen_concentration"], sensor_reading["phosphorus_concentration"],
              sensor_reading["potassium_concentration"], ts))
         conn.commit(); conn.close()
-        socketio.emit("sensor_update", {**sensor_reading, "alerts": alerts, "timestamp": ts})
+        _emit_sensor_update_ws({**sensor_reading, "alerts": alerts, "timestamp": ts})
         if alerts:
             threading.Thread(target=dispatch_alerts_to_all_farmers,
                              args=(alerts,), daemon=True).start()
@@ -2500,7 +2600,7 @@ def simulate_iot_feed():
                  reading["timestamp"]))
             conn.commit(); conn.close()
         except Exception: pass
-        socketio.emit("sensor_update", {**reading, "alerts": alerts})
+        _emit_sensor_update_ws({**reading, "alerts": alerts})
         if alerts:
             threading.Thread(target=dispatch_alerts_to_all_farmers,
                              args=(alerts,), daemon=True).start()
