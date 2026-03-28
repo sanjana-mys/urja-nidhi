@@ -92,6 +92,10 @@ TWILIO_CFG = {
 # ── Gemini ────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 FIREBASE_WEB_API_KEY = os.getenv("FIREBASE_WEB_API_KEY", "").strip()
+# Email notification mode:
+# - daily_only (default): send only scheduled daily summary emails
+# - instant: send immediate threshold alert emails too
+NOTIFICATION_EMAIL_MODE = os.getenv("NOTIFICATION_EMAIL_MODE", "daily_only").strip().lower()
 
 # MQ5 (ADS1115) helper: convert raw 0-32767 to approximate ppm for a 0-3.3V setup.
 def mq5_raw_to_ppm(methane_raw):
@@ -1724,7 +1728,12 @@ def dispatch_alerts_to_all_farmers(alerts: list):
     Critical → email + SMS.  Warning → email only.
     Uses rich build_alert_notification() for detailed messages.
     """
-    if not alerts: return
+    if not alerts:
+        return
+    # Prevent mailbox bombardment from live sensor spikes.
+    # Daily summary scheduler remains the canonical email path.
+    if NOTIFICATION_EMAIL_MODE != "instant":
+        return
     farmers = get_all_farmers()
     if not farmers: return
 
@@ -1733,12 +1742,14 @@ def dispatch_alerts_to_all_farmers(alerts: list):
     for farmer in farmers:
         fid     = farmer["id"]
         subject, email_body, sms_text = build_alert_notification(alerts, farmer.get("name",""))
-        if _notification_recently_sent(fid, subject, minutes=10) or _already_sent_today(fid, subject):
+        # Use stable dedupe subject. `subject` from build_alert_notification includes timestamp.
+        dedupe_subject = "Digester Alert"
+        if _notification_recently_sent(fid, dedupe_subject, minutes=10) or _already_sent_today(fid, dedupe_subject):
             continue
 
         if farmer.get("email"):
             threading.Thread(target=_send_email,
-                args=(farmer["email"], subject, email_body, fid),
+                args=(farmer["email"], dedupe_subject, email_body, fid),
                 daemon=True).start()
 
         if farmer.get("phone") and crit:
