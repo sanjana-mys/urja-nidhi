@@ -17,16 +17,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 # Ensure we load the project's v5/.env (not whatever the current working directory is).
 _BASE_DIR = Path(__file__).resolve().parents[1]  # .../v5/
-load_dotenv(dotenv_path=str(_BASE_DIR / ".env"))
+load_dotenv(dotenv_path=str(_BASE_DIR / ".env"), override=True)
 
 from flask import Flask, request, jsonify, render_template, session
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import joblib, numpy as np, pandas as pd
-import os, json, threading, time, sqlite3, random, smtplib, secrets, hashlib
+import os, json, threading, time, sqlite3, random, smtplib, secrets, hashlib, re
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import urllib.request
+import urllib.parse
 import sys
 
 # Windows PowerShell default encoding can break emoji prints (e.g. "✅").
@@ -43,6 +45,13 @@ app = Flask(__name__, template_folder=os.path.join(CWD, "templates"))
 app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+@app.after_request
+def add_no_cache_headers(resp):
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 # ── ML Model ──────────────────────────────────────────────────────────────────
 try:
@@ -82,6 +91,7 @@ TWILIO_CFG = {
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+FIREBASE_WEB_API_KEY = os.getenv("FIREBASE_WEB_API_KEY", "").strip()
 
 # MQ5 (ADS1115) helper: convert raw 0-32767 to approximate ppm for a 0-3.3V setup.
 def mq5_raw_to_ppm(methane_raw):
@@ -237,6 +247,63 @@ def init_firebase():
     except Exception as e:
         print(f"⚠️  Firebase init error: {e}")
         return False
+
+def get_firebase_auth_module():
+    """
+    Return firebase_admin.auth module initialised with service-account creds.
+    This is separate from Realtime DB init so email/password auth can work
+    even when FIREBASE_DATABASE_URL is not configured.
+    """
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, auth as firebase_auth
+    except Exception:
+        return None
+
+    cred_path = FIREBASE_CONFIG["credentials_path"]
+    if not os.path.exists(cred_path):
+        return None
+    try:
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred)
+        return firebase_auth
+    except Exception:
+        try:
+            return firebase_auth
+        except Exception:
+            return None
+
+def firebase_verify_email_password(email: str, password: str):
+    """
+    Verify Firebase email/password using Identity Toolkit REST API.
+    Returns (firebase_uid, error_message).
+    """
+    if not FIREBASE_WEB_API_KEY:
+        return None, "FIREBASE_WEB_API_KEY is not configured"
+    payload = json.dumps({
+        "email": email,
+        "password": password,
+        "returnSecureToken": True
+    }).encode("utf-8")
+    url = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?" + urllib.parse.urlencode({
+        "key": FIREBASE_WEB_API_KEY
+    })
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            out = json.loads(resp.read().decode("utf-8"))
+            uid = out.get("localId")
+            if not uid:
+                return None, "Firebase login response missing user id"
+            return uid, None
+    except Exception:
+        return None, "Invalid email/password or Firebase auth unavailable"
 
 def firebase_sensor_listener():
     """
@@ -417,6 +484,7 @@ def init_db():
             name TEXT NOT NULL,
             email TEXT UNIQUE,
             phone TEXT UNIQUE,
+            firebase_uid TEXT,
             digester_id TEXT DEFAULT 'DIG001',
             created_at TEXT,
             last_login TEXT
@@ -466,6 +534,10 @@ def init_db():
     _add_col("nitrogen_concentration", "REAL")
     _add_col("phosphorus_concentration", "REAL")
     _add_col("potassium_concentration", "REAL")
+    farmer_cols = {r["name"] for r in conn.execute("PRAGMA table_info(farmers)").fetchall()}
+    if "firebase_uid" not in farmer_cols:
+        conn.execute("ALTER TABLE farmers ADD COLUMN firebase_uid TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_farmers_firebase_uid ON farmers(firebase_uid)")
 
     conn.commit(); conn.close()
 
@@ -1536,6 +1608,42 @@ def build_alert_notification(alerts: list, farmer_name: str = "") -> tuple:
 # ══════════════════════════════════════════════════════════════════════════════
 # ── NOTIFICATION DELIVERY ─────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
+def _notification_recently_sent(farmer_id: int, subject: str, minutes: int = 10) -> bool:
+    """Avoid back-to-back repeated push notifications."""
+    if not farmer_id:
+        return False
+    try:
+        conn = get_db()
+        row = conn.execute("""
+            SELECT timestamp FROM notifications
+            WHERE farmer_id=? AND subject=?
+            ORDER BY id DESC LIMIT 1
+        """, (farmer_id, subject)).fetchone()
+        conn.close()
+        if not row or not row["timestamp"]:
+            return False
+        last_ts = datetime.fromisoformat(row["timestamp"])
+        return (datetime.now() - last_ts) < timedelta(minutes=minutes)
+    except Exception:
+        return False
+
+def _already_sent_today(farmer_id: int, subject: str) -> bool:
+    """Per-day dedupe by subject category (daily summary / threshold alerts)."""
+    if not farmer_id:
+        return False
+    try:
+        day_key = datetime.now().strftime("%Y-%m-%d")
+        conn = get_db()
+        row = conn.execute("""
+            SELECT COUNT(*) AS c
+            FROM notifications
+            WHERE farmer_id=? AND subject=? AND substr(timestamp,1,10)=?
+        """, (farmer_id, subject, day_key)).fetchone()
+        conn.close()
+        return bool(row and row["c"] > 0)
+    except Exception:
+        return False
+
 def _log_notification(farmer_id, channel, recipient, subject, message, status):
     try:
         conn = get_db()
@@ -1587,6 +1695,22 @@ def _send_sms(to_number: str, message: str, farmer_id: int = None) -> dict:
         _log_notification(farmer_id, "sms", to_number, "alert", message, f"failed:{e}")
         return {"success": False, "message": str(e)}
 
+def smtp_env_check() -> dict:
+    """
+    Check whether SMTP env fields are present (not empty/commented-out result).
+    """
+    required = {
+        "SMTP_HOST": SMTP_CFG.get("host", ""),
+        "SMTP_PORT": str(SMTP_CFG.get("port", "") or ""),
+        "SMTP_USER": SMTP_CFG.get("user", ""),
+        "SMTP_PASSWORD": SMTP_CFG.get("password", ""),
+    }
+    missing = [k for k, v in required.items() if not str(v).strip()]
+    return {
+        "ok": len(missing) == 0,
+        "missing": missing,
+    }
+
 def get_all_farmers() -> list:
     """Return all registered farmers."""
     conn  = get_db()
@@ -1609,6 +1733,8 @@ def dispatch_alerts_to_all_farmers(alerts: list):
     for farmer in farmers:
         fid     = farmer["id"]
         subject, email_body, sms_text = build_alert_notification(alerts, farmer.get("name",""))
+        if _notification_recently_sent(fid, subject, minutes=10) or _already_sent_today(fid, subject):
+            continue
 
         if farmer.get("email"):
             threading.Thread(target=_send_email,
@@ -1663,6 +1789,8 @@ def send_daily_summary():
 
         for farmer in farmers:
             fid = farmer["id"]
+            if _already_sent_today(fid, "Daily Digester Summary"):
+                continue
             if farmer.get("email"):
                 threading.Thread(
                     target=_send_email,
@@ -1730,11 +1858,86 @@ def get_ai_advisory(question: str, sensor_context: dict = None) -> str:
         print(f"⚠️  Gemini API error: {e}")
         return _rule_based_advisory(question, sensor_context)
 
+def _extract_numeric_context(question: str) -> dict:
+    """
+    Parse typed numeric readings from user text.
+    Supports phrases like: "pH 6.4", "temperature is 32", "pressure weak 65 kpa",
+    "methane 1200 ppm", "N 1800 P 500 K 80".
+    """
+    q = question.lower()
+    parsed = {}
+
+    def _pick(patterns):
+        for p in patterns:
+            m = re.search(p, q)
+            if m:
+                try:
+                    return float(m.group(1))
+                except Exception:
+                    continue
+        return None
+
+    ph = _pick([r"\bph\s*(?:is|=|:)?\s*([0-9]+(?:\.[0-9]+)?)"])
+    temp = _pick([r"\b(?:temp|temperature)\s*(?:is|=|:)?\s*([0-9]+(?:\.[0-9]+)?)"])
+    pressure = _pick([r"\bpressure\s*(?:is|=|:|weak|low|high)?\s*([0-9]+(?:\.[0-9]+)?)"])
+    methane = _pick([r"\bmethane\s*(?:is|=|:|level)?\s*([0-9]+(?:\.[0-9]+)?)"])
+    n = _pick([r"\bn\s*(?:is|=|:)?\s*([0-9]+(?:\.[0-9]+)?)", r"\bnitrogen\s*(?:is|=|:)?\s*([0-9]+(?:\.[0-9]+)?)"])
+    p = _pick([r"\bp\s*(?:is|=|:)?\s*([0-9]+(?:\.[0-9]+)?)", r"\bphosphorus\s*(?:is|=|:)?\s*([0-9]+(?:\.[0-9]+)?)"])
+    k = _pick([r"\bk\s*(?:is|=|:)?\s*([0-9]+(?:\.[0-9]+)?)", r"\bpotassium\s*(?:is|=|:)?\s*([0-9]+(?:\.[0-9]+)?)"])
+
+    if ph is not None: parsed["ph"] = ph
+    if temp is not None: parsed["temperature"] = temp
+    if pressure is not None: parsed["pressure"] = pressure
+    if methane is not None: parsed["methane_ppm"] = methane
+    if n is not None: parsed["nitrogen_concentration"] = n
+    if p is not None: parsed["phosphorus_concentration"] = p
+    if k is not None: parsed["potassium_concentration"] = k
+    return parsed
+
+def _is_urja_related(question: str) -> bool:
+    q = question.lower()
+    markers = [
+        "urja", "biogas", "digester", "methane", "slurry", "manure", "compost",
+        "ph", "temperature", "pressure", "gas", "npk", "nitrogen", "phosphorus",
+        "potassium", "fertilizer", "farm advisor", "cow dung", "poultry"
+    ]
+    return any(m in q for m in markers)
+
 def _rule_based_advisory(question: str, ctx: dict = None) -> str:
     q   = question.lower()
-    ctx = ctx or {}
-    ph  = ctx.get("ph",  7.0)
-    tmp = ctx.get("temperature", 35)
+    ctx = dict(ctx or {})
+    ctx.update(_extract_numeric_context(question))
+    ph  = float(ctx.get("ph", 7.0))
+    tmp = float(ctx.get("temperature", 35))
+    pressure = ctx.get("pressure")
+    methane_ppm = ctx.get("methane_ppm")
+    n_val = ctx.get("nitrogen_concentration")
+    p_val = ctx.get("phosphorus_concentration")
+    k_val = ctx.get("potassium_concentration")
+
+    # Slurry intent must win before generic waste/feedstock intent.
+    if any(w in q for w in ["slurry", "apply slurry", "slurry application", "slurry use"]):
+        return (
+            "For slurry application: dilute digested slurry 1:1 with water, apply near root zone "
+            "in evening/early morning, and avoid flooding immediately after. Typical dose: 2000–3000 L/acre "
+            "split over 2-3 rounds in the crop cycle."
+        )
+    if any(w in q for w in ["pressure", "weak pressure", "low pressure", "high pressure"]):
+        if pressure is not None:
+            p = float(pressure)
+            if p < 80:
+                return f"Pressure is {p} kPa (low). Check for leaks, slurry dilution, and inlet feeding consistency. Target range is 80-130 kPa."
+            if p > 130:
+                return f"Pressure is {p} kPa (high). Open gas usage line, inspect outlet blockage, and release pressure safely. Target is 80-130 kPa."
+        return "Pressure guidance: below 80 kPa suggests leak/low gas; above 130 kPa suggests blockage or trapped gas. Share the latest kPa value for exact steps."
+    if any(w in q for w in ["methane", "ch4"]):
+        if methane_ppm is not None:
+            m = float(methane_ppm)
+            if m < 1000:
+                return f"Methane is {m:.0f} ppm (low). Improve feed quality, keep pH 6.8-7.2, maintain 35-40°C, and avoid sudden feed changes."
+            if m > 3000:
+                return f"Methane is {m:.0f} ppm (high). Ventilation and flame-safety checks are important; verify pressure and pipeline integrity."
+        return "Methane guidance: aim roughly 1000-3000 ppm on this setup. Share your latest methane reading for targeted action."
     if any(w in q for w in ["ph","acid","alkaline","sour"]):
         if ph < 6.5: return f"Your pH is {ph} — too acidic. Add 100–200g slaked lime (chuna) in water. Check again in 24 hours. Ideal: 6.8–7.2."
         if ph > 7.8: return f"Your pH is {ph} — too high. Reduce waste input by 30% for 2 days. Target 6.8–7.2."
@@ -1743,6 +1946,12 @@ def _rule_based_advisory(question: str, ctx: dict = None) -> str:
         if tmp < 30: return f"Temperature is {tmp}°C — too cold. Cover digester with black plastic sheet. Bacteria work best at 35–40°C."
         return "Keep digester at 35–40°C for maximum gas. Insulate in winter."
     if any(w in q for w in ["fertilizer","urea","manure","npk","nitrogen","khad"]):
+        if n_val is not None or p_val is not None or k_val is not None:
+            return (
+                f"Using your NPK context (N={n_val if n_val is not None else '—'}, "
+                f"P={p_val if p_val is not None else '—'}, K={k_val if k_val is not None else '—'}), "
+                "apply slurry in split doses and reduce chemical urea gradually over 2-3 weeks."
+            )
         return "Digested slurry = excellent fertilizer. 1 m³ biogas → 0.9 kg urea equivalent (saves ₹22/kg). Dilute 1:1 with water before applying."
     # Feedstock / waste selection (cow dung vs poultry litter)
     if any(w in q for w in ["cow dung", "cow manure", "dung", "poultry litter", "poultry", "waste", "feedstock", "slurry", "manure"]):
@@ -1764,7 +1973,9 @@ def _rule_based_advisory(question: str, ctx: dict = None) -> str:
         return "2 m³ digester with 50 kg dung/day saves ₹800–1100/week. Annual saving: ₹40,000–55,000. Payback in under 6 months."
     if any(w in q for w in ["smell","odour","stink"]):
         return "Bad smell = too much protein or high pH. Reduce poultry input. Check pH — if >7.8 reduce feeding 2 days."
-    return "Namaskara! Ask me about biogas production, digester maintenance, manure quality, or crop nutrition."
+    if _is_urja_related(question):
+        return "I can help better with exact readings. Please share pH, temperature, pressure, methane, or NPK values with your question."
+    return "Please rephrase your question with Urja Nidhi context (biogas, digester readings, methane, slurry, or fertilizer use)."
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ── ROUTES ────────────────────────────────────────────────────────────────────
@@ -1789,14 +2000,14 @@ def health():
 @app.route("/api/auth/register", methods=["POST"])
 def register():
     """
-    Register a new farmer with name + (email or phone or both).
-    Body: { "name": "Rajesh Kumar", "email": "...", "phone": "+91..." }
-    At least one of email/phone is required.
+    Register a new farmer with Firebase email+password and local profile.
+    Body: { "name": "...", "email": "...", "phone": "...", "password": "......" }
     """
     data  = request.get_json(force=True)
     name  = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower() or None
     phone = (data.get("phone") or "").strip() or None
+    password = (data.get("password") or "").strip()
 
     if not name:
         return jsonify({"error": "Name is required"}), 400
@@ -1804,12 +2015,21 @@ def register():
         return jsonify({"error": "Email is required for website access"}), 400
     if not phone:
         return jsonify({"error": "Phone number is required for notifications"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
 
+    firebase_auth = get_firebase_auth_module()
+    if not firebase_auth:
+        return jsonify({"error": "Firebase credentials are not configured on server"}), 500
+
+    created_uid = None
     try:
+        fb_user = firebase_auth.create_user(email=email, password=password, display_name=name)
+        created_uid = fb_user.uid
         conn = get_db()
-        conn.execute("""INSERT INTO farmers (name,email,phone,created_at)
-            VALUES (?,?,?,?)""",
-            (name, email, phone, datetime.now().isoformat()))
+        conn.execute("""INSERT INTO farmers (name,email,phone,firebase_uid,created_at)
+            VALUES (?,?,?,?,?)""",
+            (name, email, phone, created_uid, datetime.now().isoformat()))
         conn.commit()
         farmer_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.close()
@@ -1829,22 +2049,51 @@ def register():
             "farmer":  {"id": farmer_id, "name": name, "email": email, "phone": phone}
         })
     except sqlite3.IntegrityError:
-        return jsonify({"error": "Email or phone already registered"}), 409
+        if created_uid:
+            try:
+                firebase_auth.delete_user(created_uid)
+            except Exception:
+                pass
+        # Return a precise conflict reason to avoid confusing "new email" cases.
+        try:
+            conn = get_db()
+            by_email = conn.execute("SELECT id FROM farmers WHERE email=?", (email,)).fetchone() if email else None
+            by_phone = conn.execute("SELECT id FROM farmers WHERE phone=?", (phone,)).fetchone() if phone else None
+            conn.close()
+            if by_email:
+                return jsonify({"error": "Email already registered. Please login."}), 409
+            if by_phone:
+                return jsonify({"error": "Phone number already registered. Use a different phone or login."}), 409
+        except Exception:
+            pass
+        return jsonify({"error": "Registration conflict. Email, phone, or account mapping already exists."}), 409
     except Exception as e:
+        if created_uid and firebase_auth:
+            try:
+                firebase_auth.delete_user(created_uid)
+            except Exception:
+                pass
         return jsonify({"error": str(e)}), 400
 
 # ── AUTH: Login ───────────────────────────────────────────────────────────────
 @app.route("/api/auth/login", methods=["POST"])
 def login():
     """
-    Login with email OR phone.
-    Body: { "email": "..." }  OR  { "phone": "+91..." }
+    Login with Firebase email+password, then issue local session token.
+    Body: { "email": "...", "password": "..." }
     Returns a session token.
     """
     data  = request.get_json(force=True)
     email = (data.get("email") or "").strip().lower() or None
+    password = (data.get("password") or "").strip()
     if not email:
         return jsonify({"error": "Email is required for website access"}), 400
+    if not password:
+        return jsonify({"error": "Password is required"}), 400
+
+    firebase_uid, fb_err = firebase_verify_email_password(email, password)
+    if fb_err:
+        return jsonify({"error": fb_err}), 401
 
     conn = get_db()
     farmer = conn.execute("SELECT * FROM farmers WHERE email=?", (email,)).fetchone()
@@ -1854,6 +2103,10 @@ def login():
         return jsonify({"error": "No account found. Please register first."}), 404
 
     farmer = dict(farmer)
+    if not farmer.get("firebase_uid"):
+        return jsonify({"error": "Account not linked to Firebase. Please register again."}), 401
+    if farmer.get("firebase_uid") != firebase_uid:
+        return jsonify({"error": "Firebase account mismatch for this email"}), 401
     # Update last_login
     conn = get_db()
     conn.execute("UPDATE farmers SET last_login=? WHERE id=?",
@@ -2087,6 +2340,7 @@ def predict_latest():
         r["daily_biogas_m3"] = daily
         r["analytics"] = compute_analytics(daily)
         if sensor:
+            sensor = dict(sensor)
             n_conc = sensor.get("nitrogen_concentration")
             p_conc = sensor.get("phosphorus_concentration")
             k_conc = sensor.get("potassium_concentration")
@@ -2508,6 +2762,40 @@ def notify_test():
         return jsonify({"error": f"No {channel} address registered for your account"}), 400
     return jsonify(result)
 
+@app.route("/api/notify/test-email", methods=["POST"])
+@require_login
+def notify_test_email():
+    """
+    Send a dedicated test email and report SMTP env readiness.
+    """
+    farmer = request.farmer
+    env_status = smtp_env_check()
+    if not env_status["ok"]:
+        return jsonify({
+            "success": False,
+            "error": "SMTP configuration is incomplete in .env",
+            "missing_env": env_status["missing"],
+            "env_ready": env_status["ok"],
+        }), 400
+
+    to_email = (request.get_json(silent=True) or {}).get("email") or farmer.get("email")
+    if not to_email:
+        return jsonify({"success": False, "error": "No email found for this account"}), 400
+
+    body = (
+        "This is a test email from Urja Nidhi.\n\n"
+        "If you received this, SMTP configuration is working correctly.\n"
+        f"Time: {datetime.now().isoformat()}\n"
+    )
+    result = _send_email(to_email, "SMTP Test Email", body, farmer["id"])
+    return jsonify({
+        "success": bool(result.get("success")),
+        "message": result.get("message"),
+        "env_ready": env_status["ok"],
+        "missing_env": env_status["missing"],
+        "to": to_email,
+    }), (200 if result.get("success") else 400)
+
 # ── Daily summary manual trigger (for testing) ────────────────────────────────
 @app.route("/api/notify/daily-summary", methods=["POST"])
 @require_login
@@ -2522,7 +2810,11 @@ def advisory():
     question = data.get("question", "").strip()
     if not question:
         return jsonify({"error": "question field is required"}), 400
-    ctx    = data.get("sensor_context", {})
+    ctx = data.get("sensor_context", {})
+    if not isinstance(ctx, dict):
+        ctx = {}
+    # Typed readings in the question should override generic live context.
+    ctx.update(_extract_numeric_context(question))
     answer = get_ai_advisory(question, ctx)
 
     # Get farmer_id if logged in (advisory works even without login)
